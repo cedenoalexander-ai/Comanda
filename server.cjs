@@ -685,6 +685,50 @@ app.post("/api/sheets/sync-users", async (req, res) => {
     });
   }
 });
+app.post("/api/sheets/sync-tables", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  try {
+    const tableData = dbState.tables.map((t) => {
+      const activeOrder = dbState.orders.find(
+        (o) => o.tableId === t.id && o.status !== "pagada" && o.status !== "cancelada"
+      );
+      return {
+        id: t.id,
+        name: t.name,
+        capacity: t.capacity,
+        zone: t.zone || "Sal\xF3n Principal",
+        status: t.status,
+        activeOrderNumber: activeOrder ? `#${activeOrder.orderNumber}` : "Ninguno",
+        waiterName: activeOrder ? activeOrder.waiterName : "N/A",
+        total: activeOrder ? activeOrder.total : 0,
+        itemCount: activeOrder ? activeOrder.items.length : 0
+      };
+    });
+    const payload = {
+      action: "SYNC_TABLES",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      restaurant: dbState.settings.restaurantName,
+      tables: tableData
+    };
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    res.json({
+      success: true,
+      message: `\xA1Se sincronizaron ${dbState.tables.length} mesas a la pesta\xF1a "Mesas" de tu Google Sheet!`,
+      httpStatus: response.status
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al sincronizar mesas con Google Sheets: ${err.message}`
+    });
+  }
+});
 app.get("/api/sheets/export-csv", (req, res) => {
   const headers = [
     "Numero_Pedido",
@@ -721,6 +765,15 @@ app.get("/api/sheets/export-csv", (req, res) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename=comandas_restaurante_${Date.now()}.csv`);
   res.send(csv);
+});
+app.get("/api/download-html", (req, res) => {
+  const htmlPath = import_path.default.join(process.cwd(), "dist-html", "index.html");
+  if (import_fs.default.existsSync(htmlPath)) {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="index.html"');
+    return res.sendFile(htmlPath);
+  }
+  res.status(404).send("Archivo HTML compilado no encontrado.");
 });
 app.get("/api/sheets/export-csv-users", (req, res) => {
   const headers = [
