@@ -754,11 +754,12 @@ app.post("/api/sheets/sync-menu", async (req, res) => {
     return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
   }
   try {
+    const uniqueMenu = Array.from(new Map(dbState.menu.map((item) => [item.id, item])).values());
     const payload = {
       action: "SYNC_MENU",
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       restaurant: dbState.settings.restaurantName,
-      menu: dbState.menu
+      menu: uniqueMenu
     };
     const response = await fetch(webhookUrl, {
       method: "POST",
@@ -767,7 +768,7 @@ app.post("/api/sheets/sync-menu", async (req, res) => {
     });
     res.json({
       success: true,
-      message: `\xA1Se sincronizaron ${dbState.menu.length} platos a la pesta\xF1a "Platos" de tu Google Sheet!`,
+      message: `\xA1Se sincronizaron ${uniqueMenu.length} platos a la pesta\xF1a "Platos" de tu Google Sheet!`,
       httpStatus: response.status
     });
   } catch (err) {
@@ -847,6 +848,7 @@ async function autoSyncMenuWithSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
   try {
+    const uniqueMenu = Array.from(new Map(dbState.menu.map((item) => [item.id, item])).values());
     await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -854,10 +856,10 @@ async function autoSyncMenuWithSheets() {
         action: "SYNC_MENU",
         timestamp: (/* @__PURE__ */ new Date()).toISOString(),
         restaurant: dbState.settings.restaurantName,
-        menu: dbState.menu
+        menu: uniqueMenu
       })
     });
-    console.log('[Google Sheets] Auto-synced menu to sheet "Platos"');
+    console.log(`[Google Sheets] Auto-synced ${uniqueMenu.length} unique dishes to sheet "Platos"`);
   } catch (err) {
     console.warn("[Google Sheets] autoSyncMenu error:", err.message);
   }
@@ -964,7 +966,7 @@ function scheduleServerAutoSync(entity) {
     } catch (err) {
       console.warn(`[Google Sheets Auto-Sync Server] Error en '${entity}':`, err.message);
     }
-  }, 150);
+  }, 400);
 }
 app.post("/api/sheets/sync-all-complete", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
