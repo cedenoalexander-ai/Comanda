@@ -247,6 +247,7 @@ var INITIAL_SETTINGS = {
   receiptFooter: "\xA1Gracias por su visita! Vuelva pronto.",
   googleSheetsWebhookUrl: "",
   googleSheetsLastSync: void 0,
+  autoSyncGoogleSheets: true,
   themeColor: "amber",
   headerStyle: "dark"
 };
@@ -395,6 +396,7 @@ app.post("/api/orders", (req, res) => {
   table.activeOrderId = orderId;
   dbState.orders.unshift(newOrder);
   saveState();
+  scheduleServerAutoSync("tables");
   res.status(201).json({
     message: "Pedido enviado a cocina exitosamente",
     order: newOrder,
@@ -447,6 +449,7 @@ app.post("/api/orders/:id/items", (req, res) => {
   if (waiterName) order.waiterName = waiterName;
   calculateOrderTotals(order, dbState.settings.taxPercent);
   saveState();
+  scheduleServerAutoSync("tables");
   res.json({
     message: `Ronda #${nextRound} (Adicional) enviada a cocina`,
     order,
@@ -493,6 +496,7 @@ app.post("/api/orders/:id/request-bill", (req, res) => {
     table.status = "cuenta_solicitada";
   }
   saveState();
+  scheduleServerAutoSync("tables");
   res.json({ message: "Cuenta solicitada para la mesa", order });
 });
 app.post("/api/orders/:id/pay", async (req, res) => {
@@ -518,6 +522,7 @@ app.post("/api/orders/:id/pay", async (req, res) => {
     table.activeOrderId = void 0;
   }
   saveState();
+  scheduleServerAutoSync("tables");
   if (dbState.settings.googleSheetsWebhookUrl) {
     try {
       syncOrderToGoogleSheets(order, dbState.settings.googleSheetsWebhookUrl);
@@ -543,6 +548,7 @@ app.post("/api/orders/:id/cancel", (req, res) => {
     table.activeOrderId = void 0;
   }
   saveState();
+  scheduleServerAutoSync("tables");
   res.json({ message: "Pedido cancelado", order });
 });
 async function syncOrderToGoogleSheets(order, webhookUrl) {
@@ -844,6 +850,60 @@ async function autoSyncMenuWithSheets() {
     console.warn("[Google Sheets] autoSyncMenu error:", err.message);
   }
 }
+async function autoSyncTablesWithSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return;
+  try {
+    const tableData = dbState.tables.map((t) => {
+      const activeOrder = dbState.orders.find(
+        (o) => o.tableId === t.id && o.status !== "pagada" && o.status !== "cancelada"
+      );
+      return {
+        id: t.id,
+        name: t.name,
+        capacity: t.capacity,
+        zone: t.zone || "Principal",
+        status: t.status,
+        activeOrderNumber: activeOrder ? `#${activeOrder.orderNumber}` : "Ninguno",
+        waiterName: activeOrder ? activeOrder.waiterName : "N/A",
+        total: activeOrder ? activeOrder.total : 0,
+        itemCount: activeOrder ? activeOrder.items.length : 0
+      };
+    });
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_TABLES",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        tables: tableData
+      })
+    });
+    console.log('[Google Sheets] Auto-synced tables to sheet "Mesas"');
+  } catch (err) {
+    console.warn("[Google Sheets] autoSyncTables error:", err.message);
+  }
+}
+async function autoSyncUsersWithSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_USERS",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        users: dbState.users
+      })
+    });
+    console.log('[Google Sheets] Auto-synced users to sheet "Usuario"');
+  } catch (err) {
+    console.warn("[Google Sheets] autoSyncUsers error:", err.message);
+  }
+}
 async function autoSyncUrlWithSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
@@ -867,6 +927,94 @@ async function autoSyncUrlWithSheets() {
     console.warn("[Google Sheets] autoSyncUrl error:", err.message);
   }
 }
+var serverSyncTimers = {};
+function scheduleServerAutoSync(entity) {
+  if (!dbState.settings.googleSheetsWebhookUrl || dbState.settings.autoSyncGoogleSheets === false) {
+    return;
+  }
+  if (serverSyncTimers[entity]) {
+    clearTimeout(serverSyncTimers[entity]);
+  }
+  serverSyncTimers[entity] = setTimeout(async () => {
+    try {
+      if (entity === "tables" || entity === "all") {
+        await autoSyncTablesWithSheets();
+      }
+      if (entity === "menu" || entity === "all") {
+        await autoSyncMenuWithSheets();
+      }
+      if (entity === "users" || entity === "all") {
+        await autoSyncUsersWithSheets();
+      }
+      if (entity === "url" || entity === "all") {
+        await autoSyncUrlWithSheets();
+      }
+    } catch (err) {
+      console.warn(`[Google Sheets Auto-Sync Server] Error en '${entity}':`, err.message);
+    }
+  }, 1200);
+}
+app.post("/api/sheets/sync-all-complete", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  const synced = [];
+  try {
+    await autoSyncUrlWithSheets();
+    synced.push("URL/Tasa BCV");
+  } catch (e) {
+  }
+  try {
+    await autoSyncMenuWithSheets();
+    synced.push("Platos");
+  } catch (e) {
+  }
+  try {
+    await autoSyncTablesWithSheets();
+    synced.push("Mesas");
+  } catch (e) {
+  }
+  try {
+    await autoSyncUsersWithSheets();
+    synced.push("Usuario");
+  } catch (e) {
+  }
+  try {
+    const paidOrders = dbState.orders.filter((o) => o.status === "pagada");
+    const rows = paidOrders.map((order) => ({
+      orderNumber: order.orderNumber,
+      tableName: order.tableName,
+      waiterName: order.waiterName,
+      subtotal: order.subtotal,
+      taxAmount: order.taxAmount,
+      tipAmount: order.tipAmount,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      items: order.items.map((i) => `${i.quantity}x ${i.name}`).join(" | "),
+      paidAt: order.paidAt
+    }));
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_ALL",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        orders: rows
+      })
+    });
+    synced.push("Ventas");
+  } catch (e) {
+  }
+  dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
+  saveState();
+  res.json({
+    success: true,
+    message: `\xA1Sincronizaci\xF3n completa de 5 pesta\xF1as (${synced.join(", ")}) enviada a Google Sheets exitosamente!`,
+    timestamp: dbState.settings.googleSheetsLastSync
+  });
+});
 app.get("/api/sheets/export-csv", (req, res) => {
   const headers = [
     "Numero_Pedido",
@@ -946,6 +1094,7 @@ app.put("/api/settings", (req, res) => {
     ...updates
   };
   saveState();
+  scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 ? "all" : "url");
   if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0) {
     autoSyncUrlWithSheets().catch(() => {
     });
@@ -972,8 +1121,7 @@ app.post("/api/menu", (req, res) => {
     dbState.categories.push(newItem.category);
   }
   saveState();
-  autoSyncMenuWithSheets().catch(() => {
-  });
+  scheduleServerAutoSync("menu");
   res.status(201).json({ message: "Plato agregado al men\xFA", item: newItem });
 });
 app.put("/api/menu/:id", (req, res) => {
@@ -995,8 +1143,7 @@ app.put("/api/menu/:id", (req, res) => {
   if (req.body.quickNotes !== void 0) item.quickNotes = req.body.quickNotes;
   if (req.body.available !== void 0) item.available = Boolean(req.body.available);
   saveState();
-  autoSyncMenuWithSheets().catch(() => {
-  });
+  scheduleServerAutoSync("menu");
   res.json({ message: "Plato actualizado", item });
 });
 app.delete("/api/menu/:id", (req, res) => {
@@ -1005,8 +1152,7 @@ app.delete("/api/menu/:id", (req, res) => {
   if (index === -1) return res.status(404).json({ error: "Plato no encontrado" });
   const deleted = dbState.menu.splice(index, 1)[0];
   saveState();
-  autoSyncMenuWithSheets().catch(() => {
-  });
+  scheduleServerAutoSync("menu");
   res.json({ message: "Plato eliminado del men\xFA", item: deleted });
 });
 app.post("/api/tables", (req, res) => {
@@ -1021,6 +1167,7 @@ app.post("/api/tables", (req, res) => {
   };
   dbState.tables.push(newTable);
   saveState();
+  scheduleServerAutoSync("tables");
   res.status(201).json({ message: "Mesa creada con \xE9xito", table: newTable });
 });
 app.put("/api/tables/:id", (req, res) => {
@@ -1032,6 +1179,7 @@ app.put("/api/tables/:id", (req, res) => {
   if (req.body.zone !== void 0) table.zone = req.body.zone;
   if (req.body.status !== void 0) table.status = req.body.status;
   saveState();
+  scheduleServerAutoSync("tables");
   res.json({ message: "Mesa actualizada", table });
 });
 app.delete("/api/tables/:id", (req, res) => {
@@ -1045,6 +1193,7 @@ app.delete("/api/tables/:id", (req, res) => {
   }
   dbState.tables = dbState.tables.filter((t) => t.id !== id);
   saveState();
+  scheduleServerAutoSync("tables");
   res.json({ message: "Mesa eliminada con \xE9xito", id });
 });
 app.get("/api/waiters", (req, res) => {
@@ -1118,6 +1267,7 @@ app.post("/api/users", (req, res) => {
     }
   }
   saveState();
+  scheduleServerAutoSync("users");
   res.status(201).json({ message: "Usuario creado con \xE9xito", user: newUser });
 });
 app.put("/api/users/:id", (req, res) => {
@@ -1131,6 +1281,7 @@ app.put("/api/users/:id", (req, res) => {
   if (req.body.pin !== void 0) user.pin = String(req.body.pin).trim();
   if (req.body.active !== void 0) user.active = Boolean(req.body.active);
   saveState();
+  scheduleServerAutoSync("users");
   res.json({ message: "Usuario modificado con \xE9xito", user });
 });
 app.delete("/api/users/:id", (req, res) => {
@@ -1146,6 +1297,7 @@ app.delete("/api/users/:id", (req, res) => {
   }
   const deleted = dbState.users.splice(index, 1)[0];
   saveState();
+  scheduleServerAutoSync("users");
   res.json({ message: "Usuario eliminado con \xE9xito", id: idNum, user: deleted });
 });
 app.post("/api/auth/login", (req, res) => {
