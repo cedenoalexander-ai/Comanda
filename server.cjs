@@ -237,6 +237,7 @@ var INITIAL_SETTINGS = {
   restaurantName: "Restaurante & Grill El Portal",
   currencySymbol: "$",
   currencyCode: "USD",
+  currencyBs: "Bs.",
   bcvRate: 54.2,
   bcvLastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
   taxPercent: 10,
@@ -729,6 +730,143 @@ app.post("/api/sheets/sync-tables", async (req, res) => {
     });
   }
 });
+app.post("/api/sheets/sync-menu", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  try {
+    const payload = {
+      action: "SYNC_MENU",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      restaurant: dbState.settings.restaurantName,
+      menu: dbState.menu
+    };
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    res.json({
+      success: true,
+      message: `\xA1Se sincronizaron ${dbState.menu.length} platos a la pesta\xF1a "Platos" de tu Google Sheet!`,
+      httpStatus: response.status
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al sincronizar platos con Google Sheets: ${err.message}`
+    });
+  }
+});
+app.post("/api/sheets/sync-url", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  const bcvRate = req.body.bcvRate !== void 0 ? Number(req.body.bcvRate) : dbState.settings.bcvRate;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  try {
+    const payload = {
+      action: "SYNC_URL",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      restaurant: dbState.settings.restaurantName,
+      url: webhookUrl,
+      bcvRate,
+      currencySymbol: dbState.settings.currencySymbol || "$",
+      currencyBs: dbState.settings.currencyBs || "Bs.",
+      bcvLastUpdated: dbState.settings.bcvLastUpdated || (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    res.json({
+      success: true,
+      message: `\xA1URL y Tasa BCV (Bs. ${bcvRate.toFixed(2)}) registradas en la pesta\xF1a "URL" de tu Google Sheet!`,
+      httpStatus: response.status
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al registrar en la pesta\xF1a "URL" de Google Sheets: ${err.message}`
+    });
+  }
+});
+app.get("/api/sheets/get-bcv", async (req, res) => {
+  const webhookUrl = req.query.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Webhook URL no configurada" });
+  }
+  try {
+    const fetchUrl = new URL(webhookUrl);
+    fetchUrl.searchParams.set("action", "GET_BCV");
+    const response = await fetch(fetchUrl.toString(), {
+      method: "GET"
+    });
+    const data = await response.json();
+    if (data.bcvRate && !isNaN(Number(data.bcvRate))) {
+      const parsedRate = Number(data.bcvRate);
+      dbState.settings.bcvRate = parsedRate;
+      dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      saveState();
+      return res.json({
+        success: true,
+        bcvRate: parsedRate,
+        message: `Tasa BCV sincronizada con \xE9xito desde la pesta\xF1a "URL" de Google Sheets: Bs. ${parsedRate.toFixed(2)}`
+      });
+    }
+    res.json({
+      success: false,
+      message: 'No se encontr\xF3 el par\xE1metro TASA_BCV en la pesta\xF1a "URL" de Google Sheets',
+      bcvRate: dbState.settings.bcvRate
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al consultar tasa BCV desde Google Sheets: ${err.message}`
+    });
+  }
+});
+async function autoSyncMenuWithSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_MENU",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        menu: dbState.menu
+      })
+    });
+    console.log('[Google Sheets] Auto-synced menu to sheet "Platos"');
+  } catch (err) {
+    console.warn("[Google Sheets] autoSyncMenu error:", err.message);
+  }
+}
+async function autoSyncUrlWithSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_URL",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        url: webhookUrl,
+        bcvRate: dbState.settings.bcvRate,
+        currencySymbol: dbState.settings.currencySymbol || "$",
+        currencyBs: dbState.settings.currencyBs || "Bs.",
+        bcvLastUpdated: dbState.settings.bcvLastUpdated || (/* @__PURE__ */ new Date()).toISOString()
+      })
+    });
+    console.log(`[Google Sheets] Auto-synced URL & Tasa BCV (Bs. ${dbState.settings.bcvRate}) to sheet "URL"`);
+  } catch (err) {
+    console.warn("[Google Sheets] autoSyncUrl error:", err.message);
+  }
+}
 app.get("/api/sheets/export-csv", (req, res) => {
   const headers = [
     "Numero_Pedido",
@@ -808,45 +946,57 @@ app.put("/api/settings", (req, res) => {
     ...updates
   };
   saveState();
+  if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0) {
+    autoSyncUrlWithSheets().catch(() => {
+    });
+  }
   res.json({ message: "Configuraci\xF3n actualizada", settings: dbState.settings });
 });
 app.post("/api/menu", (req, res) => {
-  const { name, category, price, description, quickNotes } = req.body;
+  const { name, category, price, description, quickNotes, available } = req.body;
   if (!name || price === void 0) {
     return res.status(400).json({ error: "Nombre y precio son requeridos" });
   }
+  const cleanPrice = typeof price === "string" ? parseFloat(price.replace(",", ".")) : Number(price);
   const newItem = {
     id: `m_${Date.now()}`,
-    name,
+    name: String(name).trim(),
     category: category || "Platos Principales",
-    price: Number(price) || 0,
+    price: isNaN(cleanPrice) ? 0 : cleanPrice,
     description: description || "",
     quickNotes: Array.isArray(quickNotes) ? quickNotes : [],
-    available: true
+    available: available !== void 0 ? Boolean(available) : true
   };
   dbState.menu.push(newItem);
   if (!dbState.categories.includes(newItem.category)) {
     dbState.categories.push(newItem.category);
   }
   saveState();
+  autoSyncMenuWithSheets().catch(() => {
+  });
   res.status(201).json({ message: "Plato agregado al men\xFA", item: newItem });
 });
 app.put("/api/menu/:id", (req, res) => {
   const { id } = req.params;
   const item = dbState.menu.find((m) => m.id === id);
   if (!item) return res.status(404).json({ error: "Plato no encontrado" });
-  if (req.body.name !== void 0) item.name = req.body.name;
+  if (req.body.name !== void 0) item.name = String(req.body.name).trim();
   if (req.body.category !== void 0) {
     item.category = req.body.category;
     if (!dbState.categories.includes(item.category)) {
       dbState.categories.push(item.category);
     }
   }
-  if (req.body.price !== void 0) item.price = Number(req.body.price) || 0;
+  if (req.body.price !== void 0) {
+    const cleanPrice = typeof req.body.price === "string" ? parseFloat(req.body.price.replace(",", ".")) : Number(req.body.price);
+    item.price = isNaN(cleanPrice) ? 0 : cleanPrice;
+  }
   if (req.body.description !== void 0) item.description = req.body.description;
   if (req.body.quickNotes !== void 0) item.quickNotes = req.body.quickNotes;
   if (req.body.available !== void 0) item.available = Boolean(req.body.available);
   saveState();
+  autoSyncMenuWithSheets().catch(() => {
+  });
   res.json({ message: "Plato actualizado", item });
 });
 app.delete("/api/menu/:id", (req, res) => {
@@ -855,6 +1005,8 @@ app.delete("/api/menu/:id", (req, res) => {
   if (index === -1) return res.status(404).json({ error: "Plato no encontrado" });
   const deleted = dbState.menu.splice(index, 1)[0];
   saveState();
+  autoSyncMenuWithSheets().catch(() => {
+  });
   res.json({ message: "Plato eliminado del men\xFA", item: deleted });
 });
 app.post("/api/tables", (req, res) => {
