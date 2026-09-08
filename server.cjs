@@ -301,6 +301,18 @@ function saveState() {
   }
 }
 loadState();
+function syncWaitersFromUsers() {
+  const mesoneros = (dbState.users || []).filter((u) => u.role === "mesonero");
+  dbState.waiters = mesoneros.map((u) => ({
+    id: `w_${u.id}`,
+    name: u.name,
+    code: String(u.id),
+    phone: "",
+    active: u.active,
+    createdAt: u.createdAt
+  }));
+}
+syncWaitersFromUsers();
 function calculateOrderTotals(order, taxPercent) {
   const subtotal = order.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
   const taxAmount = Number((subtotal * taxPercent / 100).toFixed(2));
@@ -952,7 +964,7 @@ function scheduleServerAutoSync(entity) {
     } catch (err) {
       console.warn(`[Google Sheets Auto-Sync Server] Error en '${entity}':`, err.message);
     }
-  }, 1200);
+  }, 150);
 }
 app.post("/api/sheets/sync-all-complete", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
@@ -1197,43 +1209,72 @@ app.delete("/api/tables/:id", (req, res) => {
   res.json({ message: "Mesa eliminada con \xE9xito", id });
 });
 app.get("/api/waiters", (req, res) => {
+  syncWaitersFromUsers();
   res.json({ waiters: dbState.waiters });
 });
 app.post("/api/waiters", (req, res) => {
-  const { name, code, phone, active } = req.body;
+  const { name, pin, active } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "El nombre del mesonero es obligatorio" });
   }
-  const newWaiter = {
-    id: `w_${Date.now()}`,
+  const nextId = dbState.users && dbState.users.length > 0 ? Math.max(...dbState.users.map((u) => Number(u.id) || 0)) + 1 : 1;
+  const newUser = {
+    id: nextId,
     name: name.trim(),
-    code: code ? code.trim() : `${100 + dbState.waiters.length + 1}`,
-    phone: phone ? phone.trim() : "",
+    role: "mesonero",
+    pin: pin ? String(pin).trim() : "1234",
     active: active !== void 0 ? Boolean(active) : true,
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
-  dbState.waiters.push(newWaiter);
+  dbState.users.push(newUser);
+  syncWaitersFromUsers();
   saveState();
-  res.status(201).json({ message: "Mesonero registrado con \xE9xito", waiter: newWaiter });
+  scheduleServerAutoSync("users");
+  res.status(201).json({
+    message: "Mesonero registrado en la tabla de usuarios con \xE9xito",
+    waiter: {
+      id: `w_${newUser.id}`,
+      name: newUser.name,
+      code: String(newUser.id),
+      phone: "",
+      active: newUser.active,
+      createdAt: newUser.createdAt
+    }
+  });
 });
 app.put("/api/waiters/:id", (req, res) => {
   const { id } = req.params;
-  const waiter = dbState.waiters.find((w) => w.id === id);
-  if (!waiter) return res.status(404).json({ error: "Mesonero no encontrado" });
-  if (req.body.name !== void 0) waiter.name = req.body.name.trim();
-  if (req.body.code !== void 0) waiter.code = req.body.code.trim();
-  if (req.body.phone !== void 0) waiter.phone = req.body.phone.trim();
-  if (req.body.active !== void 0) waiter.active = Boolean(req.body.active);
+  const numId = Number(id.replace("w_", ""));
+  const user = dbState.users.find((u) => u.id === numId || u.name.toLowerCase() === id.toLowerCase());
+  if (!user) return res.status(404).json({ error: "Mesonero no encontrado en la lista de usuarios" });
+  if (req.body.name !== void 0) user.name = req.body.name.trim();
+  if (req.body.pin !== void 0) user.pin = String(req.body.pin).trim();
+  if (req.body.active !== void 0) user.active = Boolean(req.body.active);
+  syncWaitersFromUsers();
   saveState();
-  res.json({ message: "Mesonero modificado con \xE9xito", waiter });
+  scheduleServerAutoSync("users");
+  res.json({
+    message: "Mesonero modificado con \xE9xito",
+    waiter: {
+      id: `w_${user.id}`,
+      name: user.name,
+      code: String(user.id),
+      phone: "",
+      active: user.active,
+      createdAt: user.createdAt
+    }
+  });
 });
 app.delete("/api/waiters/:id", (req, res) => {
   const { id } = req.params;
-  const index = dbState.waiters.findIndex((w) => w.id === id);
-  if (index === -1) return res.status(404).json({ error: "Mesonero no encontrado" });
-  const deleted = dbState.waiters.splice(index, 1)[0];
+  const numId = Number(id.replace("w_", ""));
+  const index = dbState.users.findIndex((u) => u.id === numId || u.name.toLowerCase() === id.toLowerCase());
+  if (index === -1) return res.status(404).json({ error: "Mesonero no encontrado en la lista de usuarios" });
+  const deleted = dbState.users.splice(index, 1)[0];
+  syncWaitersFromUsers();
   saveState();
-  res.json({ message: "Mesonero eliminado con \xE9xito", waiter: deleted });
+  scheduleServerAutoSync("users");
+  res.json({ message: "Mesonero eliminado de usuarios con \xE9xito", waiter: deleted });
 });
 app.get("/api/users", (req, res) => {
   res.json({ users: dbState.users });
@@ -1254,18 +1295,7 @@ app.post("/api/users", (req, res) => {
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   dbState.users.push(newUser);
-  if (newUser.role === "mesonero") {
-    const existingWaiter = dbState.waiters.find((w) => w.name.toLowerCase() === newUser.name.toLowerCase());
-    if (!existingWaiter) {
-      dbState.waiters.push({
-        id: `w_${newUser.id}_${Date.now()}`,
-        name: newUser.name,
-        code: `${newUser.id}`,
-        active: newUser.active,
-        createdAt: newUser.createdAt
-      });
-    }
-  }
+  syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
   res.status(201).json({ message: "Usuario creado con \xE9xito", user: newUser });
@@ -1280,6 +1310,7 @@ app.put("/api/users/:id", (req, res) => {
   }
   if (req.body.pin !== void 0) user.pin = String(req.body.pin).trim();
   if (req.body.active !== void 0) user.active = Boolean(req.body.active);
+  syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
   res.json({ message: "Usuario modificado con \xE9xito", user });
@@ -1296,6 +1327,7 @@ app.delete("/api/users/:id", (req, res) => {
     }
   }
   const deleted = dbState.users.splice(index, 1)[0];
+  syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
   res.json({ message: "Usuario eliminado con \xE9xito", id: idNum, user: deleted });
