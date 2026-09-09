@@ -238,7 +238,8 @@ var INITIAL_USERS = [
   { id: 1, name: "Administrador Principal", username: "admin", role: "admin", password: "123", pin: "1234", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
   { id: 2, name: "Carlos Mendoza", username: "carlos", role: "mesonero", password: "123", pin: "1111", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
   { id: 3, name: "Mar\xEDa Gonz\xE1lez", username: "maria", role: "mesonero", password: "123", pin: "2222", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
-  { id: 4, name: "Chef Mario (Cocina)", username: "cocina", role: "cocina", password: "123", pin: "3333", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() }
+  { id: 4, name: "Chef Mario (Cocina)", username: "cocina", role: "cocina", password: "123", pin: "3333", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
+  { id: 5, name: "Cajera Ana (Caja)", username: "cajera", role: "cajero", password: "123", pin: "4444", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() }
 ];
 var INITIAL_SETTINGS = {
   restaurantName: "Restaurante & Grill El Portal",
@@ -1257,7 +1258,7 @@ app.post("/api/sheets/pull-all", async (req, res) => {
             id: Number(u.id) || idx + 1,
             name: String(u.name || ""),
             username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
-            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" ? u.role : "mesonero",
+            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
             password: String(u.password || u.pin || "123"),
             pin: String(u.pin || "1234"),
             active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
@@ -1315,7 +1316,7 @@ app.post("/api/sheets/pull-all", async (req, res) => {
             id: Number(u.id) || idx + 1,
             name: String(u.name || ""),
             username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
-            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" ? u.role : "mesonero",
+            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
             password: String(u.password || u.pin || "123"),
             pin: String(u.pin || "1234"),
             active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
