@@ -1233,6 +1233,183 @@ app.post("/api/sheets/sync-all-complete", async (req, res) => {
     timestamp: dbState.settings.googleSheetsLastSync
   });
 });
+app.post("/api/sheets/pull-all", async (req, res) => {
+  const { webhookUrl: reqUrl } = req.body;
+  const webhookUrl = reqUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "No hay URL de Webhook de Google Sheets configurada" });
+  }
+  dbState.settings.googleSheetsWebhookUrl = webhookUrl;
+  const updatedStats = {};
+  let gotAll = false;
+  try {
+    const url = new URL(webhookUrl);
+    url.searchParams.set("action", "GET_ALL");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6500);
+    const gRes = await fetch(url.toString(), { method: "GET", signal: controller.signal });
+    clearTimeout(timer);
+    if (gRes.ok) {
+      const data = await gRes.json();
+      if (data && data.status === "success") {
+        if (data.users && Array.isArray(data.users) && data.users.length > 0) {
+          dbState.users = data.users.map((u, idx) => ({
+            id: Number(u.id) || idx + 1,
+            name: String(u.name || ""),
+            username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
+            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" ? u.role : "mesonero",
+            password: String(u.password || u.pin || "123"),
+            pin: String(u.pin || "1234"),
+            active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
+            createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+          }));
+          syncWaitersFromUsers();
+          updatedStats.users = dbState.users.length;
+        }
+        if (data.bcvRate !== void 0 && data.bcvRate !== null && !isNaN(Number(data.bcvRate))) {
+          dbState.settings.bcvRate = Number(data.bcvRate);
+          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+          updatedStats.bcvRate = dbState.settings.bcvRate;
+        }
+        if (data.restaurant) {
+          dbState.settings.restaurantName = data.restaurant;
+        }
+        if (data.menu && Array.isArray(data.menu) && data.menu.length > 0) {
+          dbState.menu = data.menu.map((m, idx) => ({
+            id: String(m.id || `m_${idx + 1}`),
+            name: String(m.name || "Plato"),
+            category: String(m.category || "Otros"),
+            price: Number(m.price) || 0,
+            description: String(m.description || ""),
+            quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
+            available: m.available !== false
+          }));
+          const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
+          if (cats.length > 0) dbState.categories = cats;
+          updatedStats.menu = dbState.menu.length;
+        }
+        if (data.tables && Array.isArray(data.tables) && data.tables.length > 0) {
+          dbState.tables = data.tables.map((t, idx) => ({
+            id: String(t.id || `t_${idx + 1}`),
+            name: String(t.name || `Mesa ${idx + 1}`),
+            capacity: Number(t.capacity) || 4,
+            status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
+            zone: String(t.zone || "Sal\xF3n Principal")
+          }));
+          updatedStats.tables = dbState.tables.length;
+        }
+        gotAll = true;
+      }
+    }
+  } catch {
+  }
+  if (!gotAll) {
+    try {
+      const uUrl = new URL(webhookUrl);
+      uUrl.searchParams.set("action", "GET_USERS");
+      const uRes = await fetch(uUrl.toString(), { method: "GET" });
+      if (uRes.ok) {
+        const uData = await uRes.json();
+        if (uData && uData.users && Array.isArray(uData.users) && uData.users.length > 0) {
+          dbState.users = uData.users.map((u, idx) => ({
+            id: Number(u.id) || idx + 1,
+            name: String(u.name || ""),
+            username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
+            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" ? u.role : "mesonero",
+            password: String(u.password || u.pin || "123"),
+            pin: String(u.pin || "1234"),
+            active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
+            createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+          }));
+          syncWaitersFromUsers();
+          updatedStats.users = dbState.users.length;
+        }
+      }
+    } catch {
+    }
+    try {
+      const cUrl = new URL(webhookUrl);
+      cUrl.searchParams.set("action", "GET_CONFIG");
+      const cRes = await fetch(cUrl.toString(), { method: "GET" });
+      if (cRes.ok) {
+        const cData = await cRes.json();
+        if (cData && cData.bcvRate !== void 0 && cData.bcvRate !== null && !isNaN(Number(cData.bcvRate))) {
+          dbState.settings.bcvRate = Number(cData.bcvRate);
+          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+          updatedStats.bcvRate = dbState.settings.bcvRate;
+        }
+        if (cData.restaurant) {
+          dbState.settings.restaurantName = cData.restaurant;
+        }
+      }
+    } catch {
+    }
+    try {
+      const mUrl = new URL(webhookUrl);
+      mUrl.searchParams.set("action", "GET_MENU");
+      const mRes = await fetch(mUrl.toString(), { method: "GET" });
+      if (mRes.ok) {
+        const mData = await mRes.json();
+        if (mData && mData.menu && Array.isArray(mData.menu) && mData.menu.length > 0) {
+          dbState.menu = mData.menu.map((m, idx) => ({
+            id: String(m.id || `m_${idx + 1}`),
+            name: String(m.name || "Plato"),
+            category: String(m.category || "Otros"),
+            price: Number(m.price) || 0,
+            description: String(m.description || ""),
+            quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
+            available: m.available !== false
+          }));
+          const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
+          if (cats.length > 0) dbState.categories = cats;
+          updatedStats.menu = dbState.menu.length;
+        }
+      }
+    } catch {
+    }
+    try {
+      const tUrl = new URL(webhookUrl);
+      tUrl.searchParams.set("action", "GET_TABLES");
+      const tRes = await fetch(tUrl.toString(), { method: "GET" });
+      if (tRes.ok) {
+        const tData = await tRes.json();
+        if (tData && tData.tables && Array.isArray(tData.tables) && tData.tables.length > 0) {
+          dbState.tables = tData.tables.map((t, idx) => ({
+            id: String(t.id || `t_${idx + 1}`),
+            name: String(t.name || `Mesa ${idx + 1}`),
+            capacity: Number(t.capacity) || 4,
+            status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
+            zone: String(t.zone || "Sal\xF3n Principal")
+          }));
+          updatedStats.tables = dbState.tables.length;
+        }
+      }
+    } catch {
+    }
+  }
+  dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
+  saveState();
+  broadcastServerEvent("sync_completed", { timestamp: dbState.settings.googleSheetsLastSync, updated: updatedStats });
+  const parts = [];
+  if (updatedStats.users) parts.push(`${updatedStats.users} usuarios`);
+  if (updatedStats.bcvRate) parts.push(`Tasa BCV Bs. ${updatedStats.bcvRate.toFixed(2)}`);
+  if (updatedStats.menu) parts.push(`${updatedStats.menu} platos`);
+  if (updatedStats.tables) parts.push(`${updatedStats.tables} mesas`);
+  res.json({
+    success: true,
+    message: parts.length > 0 ? `\u2713 Sincronizaci\xF3n exitosa desde Google Sheets: ${parts.join(", ")} actualizados.` : "\u2713 Datos verificados con Google Sheets.",
+    updated: updatedStats,
+    state: {
+      tables: dbState.tables,
+      menu: dbState.menu,
+      categories: dbState.categories,
+      settings: dbState.settings,
+      orders: dbState.orders,
+      waiters: dbState.waiters,
+      users: dbState.users
+    }
+  });
+});
 app.get("/api/sheets/export-csv", (req, res) => {
   const headers = [
     "Numero_Pedido",
