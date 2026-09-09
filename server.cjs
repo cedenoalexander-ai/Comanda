@@ -4,6 +4,10 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -24,6 +28,9 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 
 // server.ts
 var server_exports = {};
+__export(server_exports, {
+  broadcastServerEvent: () => broadcastServerEvent
+});
 module.exports = __toCommonJS(server_exports);
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
@@ -325,6 +332,48 @@ function calculateOrderTotals(order, taxPercent) {
   order.tipAmount = tipAmount;
   order.total = total;
 }
+var sseClients = /* @__PURE__ */ new Set();
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  sseClients.add(res);
+  res.write(`data: ${JSON.stringify({ type: "connected", clientsCount: sseClients.size, time: Date.now() })}
+
+`);
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
+});
+setInterval(() => {
+  if (sseClients.size > 0) {
+    const pingData = `data: ${JSON.stringify({ type: "ping", time: Date.now() })}
+
+`;
+    sseClients.forEach((client) => {
+      try {
+        client.write(pingData);
+      } catch {
+        sseClients.delete(client);
+      }
+    });
+  }
+}, 15e3);
+function broadcastServerEvent(eventType, data) {
+  if (sseClients.size === 0) return;
+  const payload = `data: ${JSON.stringify({ type: eventType, data, time: Date.now() })}
+
+`;
+  sseClients.forEach((client) => {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  });
+}
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: (/* @__PURE__ */ new Date()).toISOString() });
 });
@@ -409,6 +458,8 @@ app.post("/api/orders", (req, res) => {
   dbState.orders.unshift(newOrder);
   saveState();
   scheduleServerAutoSync("tables");
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("order_created", { orderId: newOrder.id, orderNumber: newOrder.orderNumber, tableName: table.name });
   res.status(201).json({
     message: "Pedido enviado a cocina exitosamente",
     order: newOrder,
@@ -462,6 +513,8 @@ app.post("/api/orders/:id/items", (req, res) => {
   calculateOrderTotals(order, dbState.settings.taxPercent);
   saveState();
   scheduleServerAutoSync("tables");
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("order_updated", { orderId: order.id, orderNumber: order.orderNumber, round: nextRound, tableName: order.tableName });
   res.json({
     message: `Ronda #${nextRound} (Adicional) enviada a cocina`,
     order,
@@ -491,6 +544,8 @@ app.patch("/api/batches/:batchId/status", (req, res) => {
     foundBatch.printedAt = (/* @__PURE__ */ new Date()).toISOString();
   }
   saveState();
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("batch_updated", { batchId, status, orderId: parentOrder?.id, tableName: parentOrder?.tableName });
   res.json({
     message: "Estado de comanda actualizado",
     batch: foundBatch,
@@ -509,6 +564,8 @@ app.post("/api/orders/:id/request-bill", (req, res) => {
   }
   saveState();
   scheduleServerAutoSync("tables");
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("bill_requested", { orderId: order.id, tableName: order.tableName, orderNumber: order.orderNumber });
   res.json({ message: "Cuenta solicitada para la mesa", order });
 });
 app.post("/api/orders/:id/pay", async (req, res) => {
@@ -535,6 +592,8 @@ app.post("/api/orders/:id/pay", async (req, res) => {
   }
   saveState();
   scheduleServerAutoSync("tables");
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("order_paid", { orderId: order.id, orderNumber: order.orderNumber, tableName: order.tableName });
   if (dbState.settings.googleSheetsWebhookUrl) {
     try {
       syncOrderToGoogleSheets(order, dbState.settings.googleSheetsWebhookUrl);
@@ -561,6 +620,8 @@ app.post("/api/orders/:id/cancel", (req, res) => {
   }
   saveState();
   scheduleServerAutoSync("tables");
+  scheduleServerAutoSync("orders");
+  broadcastServerEvent("order_cancelled", { orderId: order.id, tableName: order.tableName });
   res.json({ message: "Pedido cancelado", order });
 });
 async function syncOrderToGoogleSheets(order, webhookUrl) {
@@ -939,6 +1000,50 @@ async function autoSyncUrlWithSheets() {
     console.warn("[Google Sheets] autoSyncUrl error:", err.message);
   }
 }
+async function autoSyncOrdersWithSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return;
+  try {
+    const bcvRate = dbState.settings.bcvRate || 1;
+    const ordersData = dbState.orders.map((o) => {
+      const itemsDetail = o.items.map((i) => `${i.quantity}x ${i.name} ($${i.price})${i.notes ? " [" + i.notes + "]" : ""}`).join(" | ");
+      const totalBs = Number((o.total * bcvRate).toFixed(2));
+      const kitchenStatus = o.batches && o.batches.length > 0 ? o.batches.map((b, idx) => `Ronda ${b.round || idx + 1}: ${b.status || "pendiente"}`).join("; ") : "N/A";
+      return {
+        orderNumber: o.orderNumber,
+        tableName: o.tableName,
+        waiterName: o.waiterName,
+        status: o.status,
+        customerCount: o.customerCount || 1,
+        roundsCount: o.batches ? o.batches.length : 1,
+        itemsDetail,
+        subtotal: o.subtotal,
+        taxAmount: o.taxAmount,
+        tipAmount: o.tipAmount,
+        total: o.total,
+        totalBs,
+        kitchenStatus,
+        createdAt: o.createdAt,
+        updatedAt: o.updatedAt || o.createdAt,
+        paidAt: o.paidAt || "",
+        paymentMethod: o.paymentMethod || ""
+      };
+    });
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SYNC_ORDERS",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        restaurant: dbState.settings.restaurantName,
+        orders: ordersData
+      })
+    });
+    console.log(`[Google Sheets] Auto-synced ${ordersData.length} orders to sheet "Pedidos"`);
+  } catch (err) {
+    console.warn("[Google Sheets] autoSyncOrders error:", err.message);
+  }
+}
 var serverSyncTimers = {};
 function scheduleServerAutoSync(entity) {
   if (!dbState.settings.googleSheetsWebhookUrl || dbState.settings.autoSyncGoogleSheets === false) {
@@ -949,6 +1054,9 @@ function scheduleServerAutoSync(entity) {
   }
   serverSyncTimers[entity] = setTimeout(async () => {
     try {
+      if (entity === "orders" || entity === "all") {
+        await autoSyncOrdersWithSheets();
+      }
       if (entity === "tables" || entity === "all") {
         await autoSyncTablesWithSheets();
       }
@@ -966,6 +1074,72 @@ function scheduleServerAutoSync(entity) {
     }
   }, 150);
 }
+app.post("/api/sheets/sync-orders", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  try {
+    await autoSyncOrdersWithSheets();
+    res.json({
+      success: true,
+      message: `\xA1Se enviaron ${dbState.orders.length} pedidos/comandas a la pesta\xF1a "Pedidos" de tu Google Sheet!`
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al sincronizar pedidos con Google Sheets: ${err.message}`
+    });
+  }
+});
+app.get("/api/sheets/export-csv-orders", (req, res) => {
+  const headers = [
+    "Numero_Pedido",
+    "Mesa",
+    "Mesonero",
+    "Estado_Pedido",
+    "Estado_Cocina",
+    "Comensales",
+    "Rondas",
+    "Detalle_Productos",
+    "Subtotal_USD",
+    "Impuesto_USD",
+    "Total_USD",
+    "Total_BS",
+    "Fecha_Creacion",
+    "Ultima_Actualizacion"
+  ];
+  const bcvRate = dbState.settings.bcvRate || 1;
+  const rows = dbState.orders.map((o) => {
+    let statusLabel = o.status;
+    if (o.status === "abierta") statusLabel = "En Cocina / Abierta";
+    else if (o.status === "cuenta_solicitada") statusLabel = "Cuenta Solicitada";
+    else if (o.status === "pagada") statusLabel = "Cobrada / Pagada";
+    else if (o.status === "cancelada") statusLabel = "Cancelada";
+    const kitchenStatus = o.batches && o.batches.length > 0 ? o.batches.map((b, idx) => `Ronda ${b.round || idx + 1}: ${b.status || "pendiente"}`).join("; ") : "N/A";
+    const itemsDetail = o.items.map((i) => `${i.quantity}x ${i.name} ($${i.price})${i.notes ? " [" + i.notes + "]" : ""}`).join(" | ").replace(/"/g, '""');
+    const totalBs = Number((o.total * bcvRate).toFixed(2));
+    return [
+      `"#${o.orderNumber}"`,
+      `"${o.tableName}"`,
+      `"${o.waiterName}"`,
+      `"${statusLabel}"`,
+      `"${kitchenStatus}"`,
+      o.customerCount || 1,
+      o.batches ? o.batches.length : 1,
+      `"${itemsDetail}"`,
+      o.subtotal,
+      o.taxAmount,
+      o.total,
+      totalBs,
+      `"${o.createdAt}"`,
+      `"${o.updatedAt || o.createdAt}"`
+    ].join(",");
+  });
+  const csv = [headers.join(","), ...rows].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename=hoja_pedidos_${Date.now()}.csv`);
+  res.send(csv);
+});
 app.post("/api/sheets/sync-all-complete", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {
@@ -990,6 +1164,11 @@ app.post("/api/sheets/sync-all-complete", async (req, res) => {
   try {
     await autoSyncUsersWithSheets();
     synced.push("Usuario");
+  } catch (e) {
+  }
+  try {
+    await autoSyncOrdersWithSheets();
+    synced.push("Pedidos");
   } catch (e) {
   }
   try {
@@ -1023,7 +1202,7 @@ app.post("/api/sheets/sync-all-complete", async (req, res) => {
   saveState();
   res.json({
     success: true,
-    message: `\xA1Sincronizaci\xF3n completa de 5 pesta\xF1as (${synced.join(", ")}) enviada a Google Sheets exitosamente!`,
+    message: `\xA1Sincronizaci\xF3n completa de 6 pesta\xF1as (${synced.join(", ")}) enviada a Google Sheets exitosamente!`,
     timestamp: dbState.settings.googleSheetsLastSync
   });
 });
@@ -1107,6 +1286,7 @@ app.put("/api/settings", (req, res) => {
   };
   saveState();
   scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 ? "all" : "url");
+  broadcastServerEvent("settings_updated", { settings: dbState.settings });
   if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0) {
     autoSyncUrlWithSheets().catch(() => {
     });
@@ -1134,6 +1314,7 @@ app.post("/api/menu", (req, res) => {
   }
   saveState();
   scheduleServerAutoSync("menu");
+  broadcastServerEvent("menu_updated", { action: "create", item: newItem });
   res.status(201).json({ message: "Plato agregado al men\xFA", item: newItem });
 });
 app.put("/api/menu/:id", (req, res) => {
@@ -1156,6 +1337,7 @@ app.put("/api/menu/:id", (req, res) => {
   if (req.body.available !== void 0) item.available = Boolean(req.body.available);
   saveState();
   scheduleServerAutoSync("menu");
+  broadcastServerEvent("menu_updated", { action: "update", item });
   res.json({ message: "Plato actualizado", item });
 });
 app.delete("/api/menu/:id", (req, res) => {
@@ -1165,6 +1347,7 @@ app.delete("/api/menu/:id", (req, res) => {
   const deleted = dbState.menu.splice(index, 1)[0];
   saveState();
   scheduleServerAutoSync("menu");
+  broadcastServerEvent("menu_updated", { action: "delete", id });
   res.json({ message: "Plato eliminado del men\xFA", item: deleted });
 });
 app.post("/api/tables", (req, res) => {
@@ -1180,6 +1363,7 @@ app.post("/api/tables", (req, res) => {
   dbState.tables.push(newTable);
   saveState();
   scheduleServerAutoSync("tables");
+  broadcastServerEvent("tables_updated", { action: "create", table: newTable });
   res.status(201).json({ message: "Mesa creada con \xE9xito", table: newTable });
 });
 app.put("/api/tables/:id", (req, res) => {
@@ -1192,6 +1376,7 @@ app.put("/api/tables/:id", (req, res) => {
   if (req.body.status !== void 0) table.status = req.body.status;
   saveState();
   scheduleServerAutoSync("tables");
+  broadcastServerEvent("tables_updated", { action: "update", table });
   res.json({ message: "Mesa actualizada", table });
 });
 app.delete("/api/tables/:id", (req, res) => {
@@ -1206,6 +1391,7 @@ app.delete("/api/tables/:id", (req, res) => {
   dbState.tables = dbState.tables.filter((t) => t.id !== id);
   saveState();
   scheduleServerAutoSync("tables");
+  broadcastServerEvent("tables_updated", { action: "delete", id });
   res.json({ message: "Mesa eliminada con \xE9xito", id });
 });
 app.get("/api/waiters", (req, res) => {
@@ -1230,6 +1416,7 @@ app.post("/api/waiters", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "create", user: newUser });
   res.status(201).json({
     message: "Mesonero registrado en la tabla de usuarios con \xE9xito",
     waiter: {
@@ -1253,6 +1440,7 @@ app.put("/api/waiters/:id", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "update", user });
   res.json({
     message: "Mesonero modificado con \xE9xito",
     waiter: {
@@ -1274,6 +1462,7 @@ app.delete("/api/waiters/:id", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "delete", id: numId });
   res.json({ message: "Mesonero eliminado de usuarios con \xE9xito", waiter: deleted });
 });
 app.get("/api/users", (req, res) => {
@@ -1298,6 +1487,7 @@ app.post("/api/users", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "create", user: newUser });
   res.status(201).json({ message: "Usuario creado con \xE9xito", user: newUser });
 });
 app.put("/api/users/:id", (req, res) => {
@@ -1313,6 +1503,7 @@ app.put("/api/users/:id", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "update", user });
   res.json({ message: "Usuario modificado con \xE9xito", user });
 });
 app.delete("/api/users/:id", (req, res) => {
@@ -1330,6 +1521,7 @@ app.delete("/api/users/:id", (req, res) => {
   syncWaitersFromUsers();
   saveState();
   scheduleServerAutoSync("users");
+  broadcastServerEvent("users_updated", { action: "delete", id: idNum });
   res.json({ message: "Usuario eliminado con \xE9xito", id: idNum, user: deleted });
 });
 app.post("/api/auth/login", (req, res) => {
@@ -1383,5 +1575,9 @@ async function start() {
 }
 start().catch((err) => {
   console.error("Failed to start server:", err);
+});
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  broadcastServerEvent
 });
 //# sourceMappingURL=server.cjs.map
