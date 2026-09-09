@@ -745,6 +745,12 @@ app.post("/api/sheets/test", async (req, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(testOrder)
     });
+    const text = await response.text();
+    if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
+      return res.status(403).json({
+        error: 'Google bloque\xF3 el acceso. En Google Sheets ve a Extensiones > Apps Script > Implementar > Administrar implementaciones > Editar (icono l\xE1piz) y cambia "Qui\xE9n tiene acceso" a "Cualquier usuario" (Anyone).'
+      });
+    }
     res.json({
       success: true,
       message: '\xA1Prueba enviada con \xE9xito! Revisa tu Google Sheet en la hoja "Ventas", deber\xEDas ver la fila de prueba reci\xE9n agregada.',
@@ -753,6 +759,47 @@ app.post("/api/sheets/test", async (req, res) => {
   } catch (err) {
     res.status(500).json({
       error: `Error al conectar con Google Sheets: ${err.message}. Aseg\xFArate de que la implementaci\xF3n en Apps Script est\xE9 configurada con acceso para "Cualquiera" (Anyone).`
+    });
+  }
+});
+app.post("/api/sheets/diagnose", async (req, res) => {
+  const webhookUrl = (req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl || "").trim();
+  if (!webhookUrl) {
+    return res.status(400).json({
+      success: false,
+      issue: "URL_EMPTY",
+      error: "No se ha ingresado ninguna URL de Webhook. Pega tu enlace de Google Apps Script."
+    });
+  }
+  if (webhookUrl.endsWith("/dev")) {
+    return res.status(400).json({
+      success: false,
+      issue: "DEV_URL",
+      error: 'La URL termina en "/dev". Esta es una URL de prueba privada. Debes crear una Implementaci\xF3n en Apps Script (Implementar > Nueva implementaci\xF3n > Tipo: Aplicaci\xF3n web > Acceso: Cualquier usuario) y copiar la URL que termina en "/exec".'
+    });
+  }
+  try {
+    const getRes = await fetch(webhookUrl);
+    const getText = await getRes.text();
+    if (getText.includes("ServiceLogin") || getText.includes("accounts.google.com")) {
+      return res.status(403).json({
+        success: false,
+        issue: "PERMISSIONS_RESTRICTED",
+        error: 'Google Apps Script est\xE1 bloqueando el acceso p\xFAblico. Para solucionarlo:\n1. Ve a tu hoja de Google Sheets > Extensiones > Apps Script.\n2. Haz clic en "Implementar" > "Administrar implementaciones".\n3. Haz clic en el icono de l\xE1piz (Editar).\n4. En "Qui\xE9n tiene acceso", c\xE1mbialo de "Solo yo" a "Cualquier usuario" (Anyone).\n5. En Versi\xF3n, selecciona "Nueva versi\xF3n".\n6. Haz clic en "Implementar".'
+      });
+    }
+    const syncResult = await autoSyncOrdersWithSheets(webhookUrl);
+    return res.json({
+      success: true,
+      message: "\xA1Conexi\xF3n y sincronizaci\xF3n de Pedidos exitosa! Google Sheets respondi\xF3 correctamente.",
+      ordersSynced: dbState.orders.length,
+      details: syncResult
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      issue: "REQUEST_FAILED",
+      error: `Fallo de conexi\xF3n: ${err.message}`
     });
   }
 });
@@ -922,11 +969,15 @@ app.get("/api/sheets/get-bcv", async (req, res) => {
     });
   }
 });
-async function autoSyncMenuWithSheets() {
-  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+async function autoSyncMenuWithSheets(targetUrl) {
+  const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
+  if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
+    dbState.settings.googleSheetsWebhookUrl = targetUrl;
+    saveState();
+  }
   try {
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -936,14 +987,23 @@ async function autoSyncMenuWithSheets() {
         menu: dbState.menu
       })
     });
-    console.log('[Google Sheets] Auto-synced menu to sheet "Platos"');
+    const text = await response.text();
+    if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
+      console.warn('[Google Sheets] Error de permisos en Google Apps Script: debe estar en "Cualquier usuario" (Anyone)');
+    } else {
+      console.log('[Google Sheets] Auto-synced menu to sheet "Platos"');
+    }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncMenu error:", err.message);
   }
 }
-async function autoSyncTablesWithSheets() {
-  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+async function autoSyncTablesWithSheets(targetUrl) {
+  const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
+  if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
+    dbState.settings.googleSheetsWebhookUrl = targetUrl;
+    saveState();
+  }
   try {
     const tableData = dbState.tables.map((t) => {
       const activeOrder = dbState.orders.find(
@@ -961,7 +1021,7 @@ async function autoSyncTablesWithSheets() {
         itemCount: activeOrder ? activeOrder.items.length : 0
       };
     });
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -971,14 +1031,23 @@ async function autoSyncTablesWithSheets() {
         tables: tableData
       })
     });
-    console.log('[Google Sheets] Auto-synced tables to sheet "Mesas"');
+    const text = await response.text();
+    if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
+      console.warn("[Google Sheets] Error de permisos en Google Apps Script");
+    } else {
+      console.log('[Google Sheets] Auto-synced tables to sheet "Mesas"');
+    }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncTables error:", err.message);
   }
 }
-async function autoSyncUsersWithSheets() {
-  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+async function autoSyncUsersWithSheets(targetUrl) {
+  const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
+  if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
+    dbState.settings.googleSheetsWebhookUrl = targetUrl;
+    saveState();
+  }
   try {
     const formattedUsers = dbState.users.map((u) => ({
       id: u.id,
@@ -990,7 +1059,7 @@ async function autoSyncUsersWithSheets() {
       active: u.active,
       createdAt: u.createdAt
     }));
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1000,16 +1069,25 @@ async function autoSyncUsersWithSheets() {
         users: formattedUsers
       })
     });
-    console.log('[Google Sheets] Auto-synced users to sheet "Usuario"');
+    const text = await response.text();
+    if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
+      console.warn("[Google Sheets] Error de permisos en Google Apps Script");
+    } else {
+      console.log('[Google Sheets] Auto-synced users to sheet "Usuario"');
+    }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncUsers error:", err.message);
   }
 }
-async function autoSyncUrlWithSheets() {
-  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+async function autoSyncUrlWithSheets(targetUrl) {
+  const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
+  if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
+    dbState.settings.googleSheetsWebhookUrl = targetUrl;
+    saveState();
+  }
   try {
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1023,14 +1101,23 @@ async function autoSyncUrlWithSheets() {
         bcvLastUpdated: dbState.settings.bcvLastUpdated || (/* @__PURE__ */ new Date()).toISOString()
       })
     });
-    console.log(`[Google Sheets] Auto-synced URL & Tasa BCV (Bs. ${dbState.settings.bcvRate}) to sheet "URL"`);
+    const text = await response.text();
+    if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
+      console.warn("[Google Sheets] Error de permisos en Google Apps Script");
+    } else {
+      console.log(`[Google Sheets] Auto-synced URL & Tasa BCV (Bs. ${dbState.settings.bcvRate}) to sheet "URL"`);
+    }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncUrl error:", err.message);
   }
 }
-async function autoSyncOrdersWithSheets() {
-  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
-  if (!webhookUrl) return;
+async function autoSyncOrdersWithSheets(targetUrl) {
+  const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) return { success: false, reason: "No hay URL de Webhook configurada" };
+  if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
+    dbState.settings.googleSheetsWebhookUrl = targetUrl;
+    saveState();
+  }
   try {
     const bcvRate = dbState.settings.bcvRate || 1;
     const ordersData = dbState.orders.map((o) => {
@@ -1057,7 +1144,7 @@ async function autoSyncOrdersWithSheets() {
         paymentMethod: o.paymentMethod || ""
       };
     });
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1067,9 +1154,23 @@ async function autoSyncOrdersWithSheets() {
         orders: ordersData
       })
     });
-    console.log(`[Google Sheets] Auto-synced ${ordersData.length} orders to sheet "Pedidos"`);
+    const rawText = await response.text();
+    if (rawText.includes("ServiceLogin") || rawText.includes("accounts.google.com")) {
+      throw new Error('Google bloque\xF3 la solicitud. En Google Sheets ve a Extensiones > Apps Script > Implementar > Administrar implementaciones > Editar y aseg\xFArate de elegir: "Qui\xE9n tiene acceso: Cualquier usuario" (Anyone).');
+    }
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+    }
+    if (parsed && parsed.error) {
+      throw new Error(parsed.error);
+    }
+    console.log(`[Google Sheets] Auto-synced ${ordersData.length} orders to sheet "Pedidos" (Status: ${response.status})`);
+    return { success: true, count: ordersData.length, response: parsed || rawText };
   } catch (err) {
     console.warn("[Google Sheets] autoSyncOrders error:", err.message);
+    throw err;
   }
 }
 var serverSyncTimers = {};
@@ -1108,10 +1209,11 @@ app.post("/api/sheets/sync-orders", async (req, res) => {
     return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
   }
   try {
-    await autoSyncOrdersWithSheets();
+    const syncRes = await autoSyncOrdersWithSheets(webhookUrl);
     res.json({
       success: true,
-      message: `\xA1Se enviaron ${dbState.orders.length} pedidos/comandas a la pesta\xF1a "Pedidos" de tu Google Sheet!`
+      message: `\xA1Se enviaron ${dbState.orders.length} pedidos/comandas a la pesta\xF1a "Pedidos" de tu Google Sheet!`,
+      details: syncRes
     });
   } catch (err) {
     res.status(500).json({
@@ -1494,11 +1596,15 @@ app.put("/api/settings", (req, res) => {
     ...updates
   };
   saveState();
-  scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 ? "all" : "url");
+  scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 || updates.googleSheetsWebhookUrl ? "all" : "url");
   broadcastServerEvent("settings_updated", { settings: dbState.settings });
   if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0) {
     autoSyncUrlWithSheets().catch(() => {
     });
+    if (updates.googleSheetsWebhookUrl) {
+      autoSyncOrdersWithSheets(updates.googleSheetsWebhookUrl).catch(() => {
+      });
+    }
   }
   res.json({ message: "Configuraci\xF3n actualizada", settings: dbState.settings });
 });
