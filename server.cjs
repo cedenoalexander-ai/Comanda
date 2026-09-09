@@ -387,6 +387,9 @@ function broadcastServerEvent(eventType, data) {
   sseClients.forEach((client) => {
     try {
       client.write(payload);
+      if (typeof client.flush === "function") {
+        client.flush();
+      }
     } catch {
       sseClients.delete(client);
     }
@@ -1318,6 +1321,77 @@ function syncTablesOccupancyFromOrders() {
     };
   });
 }
+function mergeOrdersFromSheetList(ordersList) {
+  if (!Array.isArray(ordersList) || ordersList.length === 0) {
+    return { hasChanges: false, count: dbState.orders.length, newOrdersCount: 0 };
+  }
+  let hasChanges = false;
+  let newOrdersCount = 0;
+  for (const r of ordersList) {
+    const parsed = parseOrderFromSheetRow(r, dbState.orders.length);
+    const existingIndex = dbState.orders.findIndex(
+      (o) => o.orderNumber === parsed.orderNumber || o.id === parsed.id
+    );
+    if (existingIndex === -1) {
+      dbState.orders.unshift(parsed);
+      hasChanges = true;
+      newOrdersCount++;
+    } else {
+      const existing = dbState.orders[existingIndex];
+      if (parsed.status && parsed.status !== existing.status) {
+        existing.status = parsed.status;
+        existing.updatedAt = parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString();
+        if (parsed.status === "pagada" && !existing.paidAt) {
+          existing.paidAt = parsed.paidAt || existing.updatedAt;
+        }
+        hasChanges = true;
+      }
+      const sheetKitchenStatus = parsed.batches?.[0]?.status;
+      if (sheetKitchenStatus && existing.batches && existing.batches.length > 0) {
+        if (existing.batches[0].status !== sheetKitchenStatus) {
+          existing.batches[0].status = sheetKitchenStatus;
+          hasChanges = true;
+        }
+      }
+    }
+  }
+  if (hasChanges) {
+    syncTablesOccupancyFromOrders();
+    const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
+    dbState.orderCounter = Math.max(dbState.orderCounter, maxNum + 1);
+    saveState();
+    broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+    if (newOrdersCount > 0) {
+      broadcastServerEvent("new_kitchen_batch", { count: newOrdersCount });
+    }
+  }
+  return { hasChanges, count: dbState.orders.length, newOrdersCount };
+}
+var isBackgroundPollingOrders = false;
+async function backgroundPollOrdersFromSheets() {
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl || dbState.settings.autoSyncGoogleSheets === false) return;
+  if (isBackgroundPollingOrders) return;
+  isBackgroundPollingOrders = true;
+  try {
+    const url = new URL(webhookUrl);
+    url.searchParams.set("action", "GET_ORDERS");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4e3);
+    const response = await fetch(url.toString(), { method: "GET", signal: controller.signal });
+    clearTimeout(timer);
+    if (response.ok) {
+      const data = await response.json();
+      if (data && Array.isArray(data.orders) && data.orders.length > 0) {
+        mergeOrdersFromSheetList(data.orders);
+      }
+    }
+  } catch {
+  } finally {
+    isBackgroundPollingOrders = false;
+  }
+}
+setInterval(backgroundPollOrdersFromSheets, 4e3);
 app.post("/api/sheets/sync-orders", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {
@@ -1357,31 +1431,21 @@ app.post("/api/sheets/pull-orders", async (req, res) => {
     }
     const ordersList = Array.isArray(data.orders) ? data.orders : [];
     if (ordersList.length === 0) {
-      dbState.orders = [];
-      syncTablesOccupancyFromOrders();
-      dbState.orderCounter = 100;
-      saveState();
-      broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
       return res.json({
         success: true,
-        count: 0,
-        message: '\u2713 Hoja "Pedidos" vac\xEDa en Google Sheets. Se limpiaron las comandas locales y se liberaron todas las mesas para pruebas en limpio.',
+        count: dbState.orders.length,
+        message: "\u2713 No hay pedidos en Google Sheets para importar. Se conservaron los pedidos locales activos.",
         state: {
           orders: dbState.orders,
           tables: dbState.tables
         }
       });
     }
-    dbState.orders = ordersList.map((r, idx) => parseOrderFromSheetRow(r, idx));
-    syncTablesOccupancyFromOrders();
-    const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
-    dbState.orderCounter = maxNum + 1;
-    saveState();
-    broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+    const { newOrdersCount } = mergeOrdersFromSheetList(ordersList);
     res.json({
       success: true,
       count: dbState.orders.length,
-      message: `\u2713 Se sincronizaron exitosamente ${dbState.orders.length} pedidos desde la hoja "Pedidos" de Google Sheets.`,
+      message: `\u2713 Se sincronizaron exitosamente ${ordersList.length} pedidos desde Google Sheets (${newOrdersCount} nuevos recibidos para Cocina/KDS).`,
       state: {
         orders: dbState.orders,
         tables: dbState.tables
