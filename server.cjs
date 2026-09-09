@@ -852,105 +852,201 @@ app.post("/api/sheets/pull-from-sheets", async (req, res) => {
   const results = {
     menuUpdated: 0,
     tablesUpdated: 0,
-    usersUpdated: 0
+    usersUpdated: 0,
+    salesUpdated: 0
   };
   try {
+    let handledByGetAll = false;
     try {
-      const configUrl = new URL(webhookUrl);
-      configUrl.searchParams.set("action", "GET_CONFIG");
-      const configRes = await fetch(configUrl.toString());
-      if (configRes.ok) {
-        const configData = await configRes.json();
-        if (configData.bcvRate && !isNaN(Number(configData.bcvRate))) {
-          dbState.settings.bcvRate = Number(configData.bcvRate);
-          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-          results.bcvRate = dbState.settings.bcvRate;
-        }
-        if (configData.restaurant && typeof configData.restaurant === "string" && configData.restaurant.trim()) {
-          dbState.settings.restaurantName = configData.restaurant.trim();
-        }
-      }
-    } catch (e) {
-      console.warn("[Pull Sheets] Error fetching config:", e?.message);
-    }
-    try {
-      const menuUrl = new URL(webhookUrl);
-      menuUrl.searchParams.set("action", "GET_MENU");
-      const menuRes = await fetch(menuUrl.toString());
-      if (menuRes.ok) {
-        const menuData = await menuRes.json();
-        if (menuData.status === "success" && Array.isArray(menuData.menu) && menuData.menu.length > 0) {
-          const validDishes = menuData.menu.filter((m) => m && m.name && m.name.trim()).map((m, idx) => ({
-            id: m.id && m.id.trim() ? m.id.trim() : `m_sheet_${idx + 1}`,
-            name: String(m.name).trim(),
-            category: String(m.category || "General").trim(),
-            price: Number(m.price) || 0,
-            available: m.available !== false,
-            description: String(m.description || "").trim(),
-            quickNotes: []
-          }));
-          if (validDishes.length > 0) {
-            dbState.menu = validDishes;
-            const cats = Array.from(new Set(validDishes.map((d) => d.category)));
-            dbState.categories = cats.length > 0 ? cats : ["General"];
-            results.menuUpdated = validDishes.length;
+      const allUrl = new URL(webhookUrl);
+      allUrl.searchParams.set("action", "GET_ALL");
+      const allRes = await fetch(allUrl.toString());
+      if (allRes.ok) {
+        const allData = await allRes.json();
+        if (allData.status === "success") {
+          handledByGetAll = true;
+          if (allData.bcvRate && !isNaN(Number(allData.bcvRate))) {
+            dbState.settings.bcvRate = Number(allData.bcvRate);
+            dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+            results.bcvRate = dbState.settings.bcvRate;
+          }
+          if (allData.restaurant && typeof allData.restaurant === "string" && allData.restaurant.trim()) {
+            dbState.settings.restaurantName = allData.restaurant.trim();
+          }
+          if (Array.isArray(allData.menu) && allData.menu.length > 0) {
+            const validDishes = allData.menu.filter((m) => m && m.name && m.name.trim()).map((m, idx) => ({
+              id: m.id && m.id.trim() ? m.id.trim() : `m_sheet_${idx + 1}`,
+              name: String(m.name).trim(),
+              category: String(m.category || "General").trim(),
+              price: Number(m.price) || 0,
+              available: m.available !== false,
+              description: String(m.description || "").trim(),
+              quickNotes: []
+            }));
+            if (validDishes.length > 0) {
+              dbState.menu = validDishes;
+              const cats = Array.from(new Set(validDishes.map((d) => d.category)));
+              dbState.categories = cats.length > 0 ? cats : ["General"];
+              results.menuUpdated = validDishes.length;
+            }
+          }
+          if (Array.isArray(allData.tables) && allData.tables.length > 0) {
+            const validTables = allData.tables.filter((t) => t && t.name && t.name.trim()).map((t, idx) => {
+              const existingTable = dbState.tables.find((et) => et.id === t.id || et.name === t.name);
+              return {
+                id: t.id && t.id.trim() ? t.id.trim() : `t_sheet_${idx + 1}`,
+                name: String(t.name).trim(),
+                capacity: Number(t.capacity) || 4,
+                status: existingTable?.status || t.status || "libre",
+                zone: String(t.zone || "Sal\xF3n Principal").trim(),
+                activeOrderId: existingTable?.activeOrderId
+              };
+            });
+            if (validTables.length > 0) {
+              dbState.tables = validTables;
+              results.tablesUpdated = validTables.length;
+            }
+          }
+          if (Array.isArray(allData.users) && allData.users.length > 0) {
+            const validUsers = normalizeImportedUsers(allData.users, dbState.users);
+            if (validUsers.length > 0) {
+              dbState.users = validUsers;
+              syncWaitersFromUsers();
+              results.usersUpdated = validUsers.length;
+            }
+          }
+          if (Array.isArray(allData.orders) && allData.orders.length > 0) {
+            const mergedOrders = normalizeImportedOrders(allData.orders, dbState.orders, dbState.tables);
+            results.salesUpdated = mergedOrders.filter((o) => o.status === "pagada").length;
+            dbState.orders = mergedOrders;
           }
         }
       }
     } catch (e) {
-      console.warn("[Pull Sheets] Error fetching menu:", e?.message);
+      console.warn("[Pull Sheets] GET_ALL no soportado, procediendo con peticiones individuales:", e?.message);
     }
-    try {
-      const tablesUrl = new URL(webhookUrl);
-      tablesUrl.searchParams.set("action", "GET_TABLES");
-      const tablesRes = await fetch(tablesUrl.toString());
-      if (tablesRes.ok) {
-        const tablesData = await tablesRes.json();
-        if (tablesData.status === "success" && Array.isArray(tablesData.tables) && tablesData.tables.length > 0) {
-          const validTables = tablesData.tables.filter((t) => t && t.name && t.name.trim()).map((t, idx) => {
-            const existingTable = dbState.tables.find((et) => et.id === t.id || et.name === t.name);
-            return {
-              id: t.id && t.id.trim() ? t.id.trim() : `t_sheet_${idx + 1}`,
-              name: String(t.name).trim(),
-              capacity: Number(t.capacity) || 4,
-              status: existingTable?.status || t.status || "libre",
-              zone: String(t.zone || "Sal\xF3n Principal").trim(),
-              activeOrderId: existingTable?.activeOrderId
-            };
-          });
-          if (validTables.length > 0) {
-            dbState.tables = validTables;
-            results.tablesUpdated = validTables.length;
+    if (!handledByGetAll) {
+      try {
+        const configUrl = new URL(webhookUrl);
+        configUrl.searchParams.set("action", "GET_CONFIG");
+        const configRes = await fetch(configUrl.toString());
+        if (configRes.ok) {
+          const configData = await configRes.json();
+          if (configData.bcvRate && !isNaN(Number(configData.bcvRate))) {
+            dbState.settings.bcvRate = Number(configData.bcvRate);
+            dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+            results.bcvRate = dbState.settings.bcvRate;
+          }
+          if (configData.restaurant && typeof configData.restaurant === "string" && configData.restaurant.trim()) {
+            dbState.settings.restaurantName = configData.restaurant.trim();
           }
         }
+      } catch (e) {
+        console.warn("[Pull Sheets] Error fetching config:", e?.message);
       }
-    } catch (e) {
-      console.warn("[Pull Sheets] Error fetching tables:", e?.message);
-    }
-    try {
-      const usersUrl = new URL(webhookUrl);
-      usersUrl.searchParams.set("action", "GET_USERS");
-      const usersRes = await fetch(usersUrl.toString());
-      if (usersRes.ok) {
-        const usersData = await usersRes.json();
-        if (usersData.status === "success" && Array.isArray(usersData.users) && usersData.users.length > 0) {
-          const validUsers = normalizeImportedUsers(usersData.users, dbState.users);
-          if (validUsers.length > 0) {
-            dbState.users = validUsers;
-            syncWaitersFromUsers();
-            results.usersUpdated = validUsers.length;
+      try {
+        const menuUrl = new URL(webhookUrl);
+        menuUrl.searchParams.set("action", "GET_MENU");
+        const menuRes = await fetch(menuUrl.toString());
+        if (menuRes.ok) {
+          const menuData = await menuRes.json();
+          if (menuData.status === "success" && Array.isArray(menuData.menu) && menuData.menu.length > 0) {
+            const validDishes = menuData.menu.filter((m) => m && m.name && m.name.trim()).map((m, idx) => ({
+              id: m.id && m.id.trim() ? m.id.trim() : `m_sheet_${idx + 1}`,
+              name: String(m.name).trim(),
+              category: String(m.category || "General").trim(),
+              price: Number(m.price) || 0,
+              available: m.available !== false,
+              description: String(m.description || "").trim(),
+              quickNotes: []
+            }));
+            if (validDishes.length > 0) {
+              dbState.menu = validDishes;
+              const cats = Array.from(new Set(validDishes.map((d) => d.category)));
+              dbState.categories = cats.length > 0 ? cats : ["General"];
+              results.menuUpdated = validDishes.length;
+            }
           }
         }
+      } catch (e) {
+        console.warn("[Pull Sheets] Error fetching menu:", e?.message);
       }
-    } catch (e) {
-      console.warn("[Pull Sheets] Error fetching users:", e?.message);
+      try {
+        const tablesUrl = new URL(webhookUrl);
+        tablesUrl.searchParams.set("action", "GET_TABLES");
+        const tablesRes = await fetch(tablesUrl.toString());
+        if (tablesRes.ok) {
+          const tablesData = await tablesRes.json();
+          if (tablesData.status === "success" && Array.isArray(tablesData.tables) && tablesData.tables.length > 0) {
+            const validTables = tablesData.tables.filter((t) => t && t.name && t.name.trim()).map((t, idx) => {
+              const existingTable = dbState.tables.find((et) => et.id === t.id || et.name === t.name);
+              return {
+                id: t.id && t.id.trim() ? t.id.trim() : `t_sheet_${idx + 1}`,
+                name: String(t.name).trim(),
+                capacity: Number(t.capacity) || 4,
+                status: existingTable?.status || t.status || "libre",
+                zone: String(t.zone || "Sal\xF3n Principal").trim(),
+                activeOrderId: existingTable?.activeOrderId
+              };
+            });
+            if (validTables.length > 0) {
+              dbState.tables = validTables;
+              results.tablesUpdated = validTables.length;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[Pull Sheets] Error fetching tables:", e?.message);
+      }
+      try {
+        const usersUrl = new URL(webhookUrl);
+        usersUrl.searchParams.set("action", "GET_USERS");
+        const usersRes = await fetch(usersUrl.toString());
+        if (usersRes.ok) {
+          const usersData = await usersRes.json();
+          if (usersData.status === "success" && Array.isArray(usersData.users) && usersData.users.length > 0) {
+            const validUsers = normalizeImportedUsers(usersData.users, dbState.users);
+            if (validUsers.length > 0) {
+              dbState.users = validUsers;
+              syncWaitersFromUsers();
+              results.usersUpdated = validUsers.length;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[Pull Sheets] Error fetching users:", e?.message);
+      }
+      try {
+        const salesUrl = new URL(webhookUrl);
+        salesUrl.searchParams.set("action", "GET_VENTAS");
+        let salesRes = await fetch(salesUrl.toString());
+        if (!salesRes.ok) {
+          salesUrl.searchParams.set("action", "GET_ORDERS");
+          salesRes = await fetch(salesUrl.toString());
+        }
+        if (salesRes.ok) {
+          const salesData = await salesRes.json();
+          if (salesData.status === "success" && Array.isArray(salesData.orders) && salesData.orders.length > 0) {
+            const mergedOrders = normalizeImportedOrders(salesData.orders, dbState.orders, dbState.tables);
+            results.salesUpdated = mergedOrders.filter((o) => o.status === "pagada").length;
+            dbState.orders = mergedOrders;
+          }
+        }
+      } catch (e) {
+        console.warn("[Pull Sheets] Error fetching sales:", e?.message);
+      }
     }
     dbState.settings.googleSheetsWebhookUrl = webhookUrl;
     dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
     saveState();
+    const parts = [];
+    if (results.menuUpdated) parts.push(`${results.menuUpdated} platos`);
+    if (results.tablesUpdated) parts.push(`${results.tablesUpdated} mesas`);
+    if (results.usersUpdated) parts.push(`${results.usersUpdated} usuarios`);
+    if (results.salesUpdated) parts.push(`${results.salesUpdated} ventas`);
     res.json({
       success: true,
-      message: `\xA1Datos actualizados desde Google Sheets! Platos: ${results.menuUpdated}, Mesas: ${results.tablesUpdated}, Usuarios: ${results.usersUpdated}`,
+      message: `\xA1Datos actualizados desde Google Sheets! ${parts.join(", ")}`,
       results,
       state: {
         tables: dbState.tables,
@@ -1068,6 +1164,172 @@ app.post("/api/sheets/pull-users", async (req, res) => {
     console.error("[pull-users] Error:", err);
     res.status(500).json({
       error: `Error al descargar usuarios desde Google Sheets: ${err.message}`
+    });
+  }
+});
+function parseOrderItemsServerString(itemsStr, defaultPrice = 0) {
+  if (Array.isArray(itemsStr) && itemsStr.length > 0) {
+    return itemsStr.map((item, idx) => ({
+      id: item.id || `it_p_${Date.now()}_${idx}`,
+      menuItemId: item.menuItemId || `m_${idx + 1}`,
+      name: String(item.name || `Item ${idx + 1}`).trim(),
+      price: Number(item.price) || 0,
+      quantity: Number(item.quantity) || 1,
+      notes: String(item.notes || "").trim(),
+      round: Number(item.round) || 1,
+      addedAt: item.addedAt || (/* @__PURE__ */ new Date()).toISOString()
+    }));
+  }
+  if (typeof itemsStr !== "string" || !itemsStr.trim()) {
+    return [{
+      id: `it_p_${Date.now()}_1`,
+      menuItemId: "m1",
+      name: "Consumo General",
+      price: defaultPrice,
+      quantity: 1,
+      notes: "",
+      round: 1,
+      addedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }];
+  }
+  const parts = itemsStr.split(/[|;\n]+/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    return [{
+      id: `it_p_${Date.now()}_1`,
+      menuItemId: "m1",
+      name: itemsStr.trim() || "Consumo General",
+      price: defaultPrice,
+      quantity: 1,
+      notes: "",
+      round: 1,
+      addedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }];
+  }
+  return parts.map((part, idx) => {
+    const match = part.match(/^(?:(\d+)\s*x?\s+)?(.*?)(?:\s*\(\$?([0-9.,]+)\)|\s+\$?([0-9.,]+))?$/i);
+    const qty = match && match[1] ? parseInt(match[1], 10) : 1;
+    let name = match && match[2] ? match[2].trim() : part;
+    let parsedPrice = match && (match[3] || match[4]) ? parseFloat(String(match[3] || match[4]).replace(",", ".")) : defaultPrice / parts.length;
+    if (!name) name = `Item ${idx + 1}`;
+    return {
+      id: `it_p_${Date.now()}_${idx + 1}`,
+      menuItemId: `m_import_${idx + 1}`,
+      name,
+      price: isNaN(parsedPrice) ? 0 : Number(parsedPrice.toFixed(2)),
+      quantity: isNaN(qty) || qty < 1 ? 1 : qty,
+      notes: "",
+      round: 1,
+      addedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  });
+}
+function normalizeImportedOrders(rawOrders, currentOrders, tables) {
+  if (!Array.isArray(rawOrders) || rawOrders.length === 0) return currentOrders;
+  const merged = [...currentOrders];
+  const existingMap = /* @__PURE__ */ new Map();
+  merged.forEach((o) => {
+    existingMap.set(Number(o.orderNumber), o);
+  });
+  rawOrders.forEach((ro, idx) => {
+    if (!ro || typeof ro !== "object") return;
+    const rawNum = String(ro.orderNumber || ro.num || ro.numero || "").replace("#", "").trim();
+    const orderNum = parseInt(rawNum, 10) || idx + 101;
+    const tableName = String(ro.tableName || ro.mesa || "Mesa 1").trim();
+    const tableObj = tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase()) || tables[0];
+    const tableId = tableObj ? tableObj.id : "t1";
+    const waiterName = String(ro.waiterName || ro.mesonero || "Mesonero").trim();
+    const total = Number(ro.total) || 0;
+    const subtotal = Number(ro.subtotal) || total;
+    const taxAmount = Number(ro.taxAmount) || 0;
+    const tipAmount = Number(ro.tipAmount) || 0;
+    const paymentMethod = String(ro.paymentMethod || ro.metodo || "efectivo").trim().toLowerCase();
+    const paymentReference = String(ro.paymentReference || ro.referencia || "").trim();
+    const paidAt = ro.paidAt ? String(ro.paidAt).trim() : (/* @__PURE__ */ new Date()).toISOString();
+    const items = parseOrderItemsServerString(ro.items, subtotal || total);
+    if (existingMap.has(orderNum)) {
+      const existing = existingMap.get(orderNum);
+      if (existing.status !== "pagada") {
+        existing.status = "pagada";
+        existing.paidAt = paidAt;
+        existing.paymentMethod = paymentMethod;
+        existing.paymentReference = paymentReference;
+      }
+    } else {
+      const newOrder = {
+        id: `ord_sheet_${orderNum}_${Date.now()}`,
+        orderNumber: orderNum,
+        tableId,
+        tableName,
+        waiterName,
+        customerCount: 2,
+        status: "pagada",
+        createdAt: paidAt,
+        updatedAt: paidAt,
+        paidAt,
+        items,
+        batches: [],
+        subtotal,
+        taxPercent: dbState.settings.taxPercent || 10,
+        taxAmount,
+        tipPercent: 0,
+        tipAmount,
+        discountAmount: 0,
+        total,
+        paymentMethod,
+        paymentReference,
+        syncedToSheets: true
+      };
+      merged.push(newOrder);
+      existingMap.set(orderNum, newOrder);
+    }
+  });
+  const maxNum = Math.max(100, ...merged.map((o) => parseInt(String(o.orderNumber), 10) || 0));
+  if (maxNum >= dbState.orderCounter) {
+    dbState.orderCounter = maxNum + 1;
+  }
+  return merged;
+}
+app.post("/api/sheets/pull-sales", async (req, res) => {
+  try {
+    const webhookUrl = req.body?.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+    if (!webhookUrl || typeof webhookUrl !== "string" || !webhookUrl.startsWith("http")) {
+      return res.status(400).json({
+        error: "URL de Google Apps Script no configurada o no v\xE1lida"
+      });
+    }
+    const salesUrl = new URL(webhookUrl);
+    salesUrl.searchParams.set("action", "GET_VENTAS");
+    let response = await fetch(salesUrl.toString());
+    if (!response.ok) {
+      salesUrl.searchParams.set("action", "GET_ORDERS");
+      response = await fetch(salesUrl.toString());
+    }
+    if (!response.ok) {
+      throw new Error(`Google Sheets respondi\xF3 con status HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.status !== "success" || !Array.isArray(data.orders)) {
+      throw new Error(data.message || "La respuesta de Google Sheets no contiene una lista v\xE1lida de ventas.");
+    }
+    const mergedOrders = normalizeImportedOrders(data.orders, dbState.orders, dbState.tables);
+    dbState.orders = mergedOrders;
+    dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
+    saveState();
+    const paidCount = mergedOrders.filter((o) => o.status === "pagada").length;
+    res.json({
+      success: true,
+      message: `\xA1Ventas descargadas con \xE9xito! ${paidCount} comandas pagadas registradas en el historial.`,
+      salesCount: paidCount,
+      orders: dbState.orders,
+      state: {
+        orders: dbState.orders,
+        settings: dbState.settings
+      }
+    });
+  } catch (err) {
+    console.error("[pull-sales] Error:", err);
+    res.status(500).json({
+      error: `Error al descargar ventas desde Google Sheets: ${err.message}`
     });
   }
 });
