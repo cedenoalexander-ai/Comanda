@@ -917,7 +917,7 @@ app.post("/api/sheets/pull-from-sheets", async (req, res) => {
           }
           if (Array.isArray(allData.orders) && allData.orders.length > 0) {
             const mergedOrders = normalizeImportedOrders(allData.orders, dbState.orders, dbState.tables);
-            results.salesUpdated = mergedOrders.filter((o) => o.status === "pagada").length;
+            results.salesUpdated = allData.orders.length;
             dbState.orders = mergedOrders;
           }
         }
@@ -1028,7 +1028,7 @@ app.post("/api/sheets/pull-from-sheets", async (req, res) => {
           const salesData = await salesRes.json();
           if (salesData.status === "success" && Array.isArray(salesData.orders) && salesData.orders.length > 0) {
             const mergedOrders = normalizeImportedOrders(salesData.orders, dbState.orders, dbState.tables);
-            results.salesUpdated = mergedOrders.filter((o) => o.status === "pagada").length;
+            results.salesUpdated = salesData.orders.length;
             dbState.orders = mergedOrders;
           }
         }
@@ -1223,6 +1223,22 @@ function parseOrderItemsServerString(itemsStr, defaultPrice = 0) {
     };
   });
 }
+function parseCleanNumberServer(val) {
+  if (val === void 0 || val === null || val === "") return 0;
+  if (typeof val === "number") return isNaN(val) ? 0 : val;
+  let str = String(val).replace(/[$€Bs\s]/gi, "").trim();
+  if (str.includes(",") && str.includes(".")) {
+    if (str.indexOf(",") < str.indexOf(".")) {
+      str = str.replace(/,/g, "");
+    } else {
+      str = str.replace(/\./g, "").replace(",", ".");
+    }
+  } else if (str.includes(",")) {
+    str = str.replace(",", ".");
+  }
+  const n = parseFloat(str);
+  return isNaN(n) ? 0 : n;
+}
 function normalizeImportedOrders(rawOrders, currentOrders, tables) {
   if (!Array.isArray(rawOrders) || rawOrders.length === 0) return currentOrders;
   const merged = [...currentOrders];
@@ -1232,31 +1248,38 @@ function normalizeImportedOrders(rawOrders, currentOrders, tables) {
   });
   rawOrders.forEach((ro, idx) => {
     if (!ro || typeof ro !== "object") return;
-    const rawNum = String(ro.orderNumber || ro.num || ro.numero || "").replace("#", "").trim();
-    const orderNum = parseInt(rawNum, 10) || idx + 101;
+    const rawNum = String(ro.orderNumber || ro.num || ro.numero || "").trim();
+    const numMatch = rawNum.match(/\d+/);
+    const orderNum = numMatch ? parseInt(numMatch[0], 10) : idx + 101;
     const tableName = String(ro.tableName || ro.mesa || "Mesa 1").trim();
     const tableObj = tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase()) || tables[0];
     const tableId = tableObj ? tableObj.id : "t1";
     const waiterName = String(ro.waiterName || ro.mesonero || "Mesonero").trim();
-    const total = Number(ro.total) || 0;
-    const subtotal = Number(ro.subtotal) || total;
-    const taxAmount = Number(ro.taxAmount) || 0;
-    const tipAmount = Number(ro.tipAmount) || 0;
+    const total = parseCleanNumberServer(ro.total);
+    const subtotal = parseCleanNumberServer(ro.subtotal) || total;
+    const taxAmount = parseCleanNumberServer(ro.taxAmount);
+    const tipAmount = parseCleanNumberServer(ro.tipAmount);
     const paymentMethod = String(ro.paymentMethod || ro.metodo || "efectivo").trim().toLowerCase();
     const paymentReference = String(ro.paymentReference || ro.referencia || "").trim();
     const paidAt = ro.paidAt ? String(ro.paidAt).trim() : (/* @__PURE__ */ new Date()).toISOString();
     const items = parseOrderItemsServerString(ro.items, subtotal || total);
     if (existingMap.has(orderNum)) {
       const existing = existingMap.get(orderNum);
-      if (existing.status !== "pagada") {
-        existing.status = "pagada";
-        existing.paidAt = paidAt;
-        existing.paymentMethod = paymentMethod;
-        existing.paymentReference = paymentReference;
-      }
+      existing.status = "pagada";
+      existing.paidAt = paidAt || existing.paidAt;
+      existing.paymentMethod = paymentMethod || existing.paymentMethod;
+      existing.paymentReference = paymentReference || existing.paymentReference;
+      if (total > 0) existing.total = total;
+      if (subtotal > 0) existing.subtotal = subtotal;
+      if (taxAmount > 0) existing.taxAmount = taxAmount;
+      if (tipAmount > 0) existing.tipAmount = tipAmount;
+      if (tableName) existing.tableName = tableName;
+      if (waiterName) existing.waiterName = waiterName;
+      if (items && items.length > 0) existing.items = items;
+      existing.syncedToSheets = true;
     } else {
       const newOrder = {
-        id: `ord_sheet_${orderNum}_${Date.now()}`,
+        id: `ord_sheet_${orderNum}_${Date.now()}_${idx}`,
         orderNumber: orderNum,
         tableId,
         tableName,
@@ -1309,17 +1332,20 @@ app.post("/api/sheets/pull-sales", async (req, res) => {
     }
     const data = await response.json();
     if (data.status !== "success" || !Array.isArray(data.orders)) {
-      throw new Error(data.message || "La respuesta de Google Sheets no contiene una lista v\xE1lida de ventas.");
+      throw new Error(data.message || data.error || "La respuesta de Google Sheets no contiene una lista v\xE1lida de ventas.");
     }
     const mergedOrders = normalizeImportedOrders(data.orders, dbState.orders, dbState.tables);
     dbState.orders = mergedOrders;
     dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
     saveState();
+    const importedCount = data.orders.length;
     const paidCount = mergedOrders.filter((o) => o.status === "pagada").length;
+    const message = importedCount > 0 ? `\xA1Ventas descargadas con \xE9xito! Se cargaron ${importedCount} comandas desde Google Sheets (${paidCount} comandas pagadas en total en la app).` : 'Conexi\xF3n con Google Sheets correcta, pero no se encontraron filas de ventas en la pesta\xF1a "Ventas".';
     res.json({
       success: true,
-      message: `\xA1Ventas descargadas con \xE9xito! ${paidCount} comandas pagadas registradas en el historial.`,
-      salesCount: paidCount,
+      message,
+      salesCount: importedCount,
+      totalPaidCount: paidCount,
       orders: dbState.orders,
       state: {
         orders: dbState.orders,
