@@ -235,10 +235,10 @@ var INITIAL_TABLES = [
   { id: "t12", name: "Mesa Jard\xEDn", capacity: 6, status: "libre", zone: "Jard\xEDn Externo" }
 ];
 var INITIAL_USERS = [
-  { id: 1, name: "Administrador Principal", role: "admin", pin: "1234", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
-  { id: 2, name: "Carlos Mendoza", role: "mesonero", pin: "1111", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
-  { id: 3, name: "Mar\xEDa Gonz\xE1lez", role: "mesonero", pin: "2222", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
-  { id: 4, name: "Chef Mario (Cocina)", role: "cocina", pin: "3333", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() }
+  { id: 1, name: "Administrador Principal", username: "admin", role: "admin", password: "123", pin: "1234", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
+  { id: 2, name: "Carlos Mendoza", username: "carlos", role: "mesonero", password: "123", pin: "1111", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
+  { id: 3, name: "Mar\xEDa Gonz\xE1lez", username: "maria", role: "mesonero", password: "123", pin: "2222", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() },
+  { id: 4, name: "Chef Mario (Cocina)", username: "cocina", role: "cocina", password: "123", pin: "3333", active: true, createdAt: (/* @__PURE__ */ new Date()).toISOString() }
 ];
 var INITIAL_SETTINGS = {
   restaurantName: "Restaurante & Grill El Portal",
@@ -287,7 +287,24 @@ function loadState() {
         orders: loaded.orders || [],
         orderCounter: loaded.orderCounter || 100,
         waiters: loaded.waiters || INITIAL_WAITERS,
-        users: loaded.users && loaded.users.length > 0 ? loaded.users : INITIAL_USERS
+        users: (() => {
+          const rawUsers = loaded.users && loaded.users.length > 0 ? loaded.users : INITIAL_USERS;
+          return rawUsers.map((u, idx) => {
+            let uname = u.username;
+            if (!uname) {
+              if (u.name.toLowerCase().includes("admin")) uname = "admin";
+              else if (u.name.toLowerCase().includes("carlos")) uname = "carlos";
+              else if (u.name.toLowerCase().includes("mar\xEDa") || u.name.toLowerCase().includes("maria")) uname = "maria";
+              else if (u.name.toLowerCase().includes("cocina") || u.name.toLowerCase().includes("mario")) uname = "cocina";
+              else uname = u.name.trim().toLowerCase().split(" ")[0] || `user${u.id || idx + 1}`;
+            }
+            return {
+              ...u,
+              username: uname.toLowerCase().trim(),
+              password: u.password || u.pin || "123"
+            };
+          });
+        })()
       };
       console.log(`[Store] Loaded ${dbState.orders.length} orders, ${dbState.tables.length} tables, ${dbState.users.length} users from ${DATA_FILE}`);
     } else {
@@ -962,6 +979,16 @@ async function autoSyncUsersWithSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
   try {
+    const formattedUsers = dbState.users.map((u) => ({
+      id: u.id,
+      name: u.name,
+      username: u.username || u.name.toLowerCase().split(" ")[0],
+      role: u.role,
+      password: u.password || u.pin || "123",
+      pin: u.pin || "",
+      active: u.active,
+      createdAt: u.createdAt
+    }));
     await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -969,7 +996,7 @@ async function autoSyncUsersWithSheets() {
         action: "SYNC_USERS",
         timestamp: (/* @__PURE__ */ new Date()).toISOString(),
         restaurant: dbState.settings.restaurantName,
-        users: dbState.users
+        users: formattedUsers
       })
     });
     console.log('[Google Sheets] Auto-synced users to sheet "Usuario"');
@@ -1255,8 +1282,10 @@ app.get("/api/download-html", (req, res) => {
 app.get("/api/sheets/export-csv-users", (req, res) => {
   const headers = [
     "Id_Usuario",
-    "Nombre_Usuario",
+    "Nombre_Completo",
+    "Usuario_Login",
     "Rol",
+    "Contrasena",
     "PIN",
     "Estado",
     "Fecha_Creacion"
@@ -1264,7 +1293,9 @@ app.get("/api/sheets/export-csv-users", (req, res) => {
   const rows = dbState.users.map((u) => [
     u.id,
     `"${u.name.replace(/"/g, '""')}"`,
+    `"${(u.username || u.name.toLowerCase().split(" ")[0]).replace(/"/g, '""')}"`,
     `"${u.role}"`,
+    `"${(u.password || u.pin || "123").replace(/"/g, '""')}"`,
     `"${u.pin || ""}"`,
     `"${u.active ? "Activo" : "Inactivo"}"`,
     `"${u.createdAt}"`
@@ -1469,16 +1500,20 @@ app.get("/api/users", (req, res) => {
   res.json({ users: dbState.users });
 });
 app.post("/api/users", (req, res) => {
-  const { name, role, pin, active } = req.body;
+  const { name, role, username, password, pin, active } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "El nombre del usuario es obligatorio" });
   }
   const nextId = dbState.users && dbState.users.length > 0 ? Math.max(...dbState.users.map((u) => Number(u.id) || 0)) + 1 : 1;
   const validRole = role === "admin" || role === "cocina" || role === "mesonero" ? role : "mesonero";
+  const cleanName = name.trim();
+  const cleanUsername = username ? String(username).trim().toLowerCase() : cleanName.toLowerCase().split(" ")[0] || `user${nextId}`;
   const newUser = {
     id: nextId,
-    name: name.trim(),
+    name: cleanName,
+    username: cleanUsername,
     role: validRole,
+    password: password ? String(password).trim() : pin ? String(pin).trim() : "123",
     pin: pin ? String(pin).trim() : "1234",
     active: active !== void 0 ? Boolean(active) : true,
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -1495,6 +1530,8 @@ app.put("/api/users/:id", (req, res) => {
   const user = dbState.users.find((u) => u.id === idNum);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   if (req.body.name !== void 0) user.name = req.body.name.trim();
+  if (req.body.username !== void 0) user.username = String(req.body.username).trim().toLowerCase();
+  if (req.body.password !== void 0) user.password = String(req.body.password).trim();
   if (req.body.role !== void 0 && (req.body.role === "admin" || req.body.role === "cocina" || req.body.role === "mesonero")) {
     user.role = req.body.role;
   }
@@ -1524,21 +1561,111 @@ app.delete("/api/users/:id", (req, res) => {
   broadcastServerEvent("users_updated", { action: "delete", id: idNum });
   res.json({ message: "Usuario eliminado con \xE9xito", id: idNum, user: deleted });
 });
-app.post("/api/auth/login", (req, res) => {
-  const { userId, pin } = req.body;
-  const user = dbState.users.find((u) => u.id === Number(userId));
-  if (!user) {
-    return res.status(404).json({ error: "Usuario no encontrado" });
+app.post("/api/auth/login", async (req, res) => {
+  const { username, password, userId, pin } = req.body;
+  const rawUser = username !== void 0 ? String(username) : userId !== void 0 ? String(userId) : "";
+  const lookupUser = rawUser.trim().toLowerCase();
+  const lookupPass = password !== void 0 ? String(password).trim() : pin !== void 0 ? String(pin).trim() : "";
+  if (!lookupUser) {
+    return res.status(400).json({ error: "Por favor ingrese su nombre de usuario" });
   }
-  if (!user.active) {
-    return res.status(403).json({ error: "Este usuario est\xE1 inactivo. Contacte al administrador." });
+  let authenticatedUser = null;
+  let verifiedVia = "Servidor Local";
+  let sheetSyncMessage = "";
+  const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
+  if (webhookUrl) {
+    try {
+      const verifyUrl = new URL(webhookUrl);
+      verifyUrl.searchParams.set("action", "VERIFY_USER");
+      verifyUrl.searchParams.set("username", lookupUser);
+      verifyUrl.searchParams.set("password", lookupPass);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6e3);
+      const sheetRes = await fetch(verifyUrl.toString(), {
+        method: "GET",
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (sheetRes.ok) {
+        const sheetData = await sheetRes.json();
+        if (sheetData && sheetData.verified && sheetData.user) {
+          verifiedVia = 'Google Sheets (Hoja "Usuario")';
+          let localUser = dbState.users.find(
+            (u) => u.username && u.username.toLowerCase() === lookupUser || u.name.toLowerCase() === sheetData.user.name?.toLowerCase() || String(u.id) === String(sheetData.user.id)
+          );
+          if (!localUser) {
+            localUser = {
+              id: Number(sheetData.user.id) || Math.max(...dbState.users.map((u) => u.id), 0) + 1,
+              name: sheetData.user.name || lookupUser,
+              username: sheetData.user.username || lookupUser,
+              role: sheetData.user.role || "mesonero",
+              password: lookupPass,
+              pin: sheetData.user.pin || "1234",
+              active: true,
+              createdAt: (/* @__PURE__ */ new Date()).toISOString()
+            };
+            dbState.users.push(localUser);
+          } else {
+            if (sheetData.user.role) localUser.role = sheetData.user.role;
+            if (sheetData.user.name) localUser.name = sheetData.user.name;
+            localUser.username = lookupUser;
+            if (lookupPass) localUser.password = lookupPass;
+          }
+          authenticatedUser = localUser;
+          saveState();
+        } else if (sheetData && sheetData.verified === false) {
+          return res.status(401).json({
+            error: sheetData.error || "Credenciales no v\xE1lidas seg\xFAn la hoja Usuario en Google Sheets"
+          });
+        }
+      }
+    } catch (sheetErr) {
+      console.warn("[Auth] Verificaci\xF3n con Google Sheets no respondi\xF3 a tiempo, recurriendo a verificaci\xF3n local:", sheetErr.message);
+    }
   }
-  if (user.pin && pin && user.pin !== pin) {
-    return res.status(401).json({ error: "PIN de acceso incorrecto" });
+  if (!authenticatedUser) {
+    const user = dbState.users.find((u) => {
+      const matchUsername = u.username && u.username.toLowerCase() === lookupUser;
+      const matchName = u.name.toLowerCase() === lookupUser;
+      const matchId = String(u.id) === lookupUser;
+      return matchUsername || matchName || matchId;
+    });
+    if (!user) {
+      return res.status(404).json({
+        error: `El usuario "${rawUser}" no existe en el sistema ni en Google Sheets. Verifique sus datos o reg\xEDstrelo en Administraci\xF3n.`
+      });
+    }
+    if (!user.active) {
+      return res.status(403).json({
+        error: `El usuario "${user.name}" se encuentra inactivo. Contacte al administrador del sistema.`
+      });
+    }
+    const expectedPass = user.password || user.pin || "";
+    if (expectedPass && lookupPass) {
+      const matchPassword = user.password && user.password === lookupPass;
+      const matchPin = user.pin && user.pin === lookupPass;
+      if (!matchPassword && !matchPin) {
+        return res.status(401).json({ error: "Contrase\xF1a o PIN incorrecto. Intente de nuevo." });
+      }
+    } else if (expectedPass && !lookupPass) {
+      return res.status(401).json({ error: "Debe ingresar la contrase\xF1a de acceso." });
+    }
+    authenticatedUser = user;
+    verifiedVia = "Servidor Local";
+  }
+  if (webhookUrl) {
+    dbState.settings.autoSyncGoogleSheets = true;
+    saveState();
+    scheduleServerAutoSync("all");
+    sheetSyncMessage = "Sincronizaci\xF3n autom\xE1tica con Google Sheets activada.";
   }
   res.json({
+    success: true,
     message: "Inicio de sesi\xF3n exitoso",
-    user
+    user: authenticatedUser,
+    verifiedVia,
+    autoSyncStarted: Boolean(webhookUrl),
+    sheetSyncMessage
   });
 });
 app.post("/api/reset-demo", (req, res) => {
