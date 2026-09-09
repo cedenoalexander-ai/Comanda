@@ -1598,144 +1598,99 @@ app.post("/api/sheets/pull-all", async (req, res) => {
           }));
           updatedStats.tables = dbState.tables.length;
         }
-        if (data.orders !== void 0 && Array.isArray(data.orders)) {
-          if (data.orders.length === 0) {
-            dbState.orders = [];
-            syncTablesOccupancyFromOrders();
-            dbState.orderCounter = 100;
-            updatedStats.orders = 0;
-          } else {
-            dbState.orders = data.orders.map((r, idx) => parseOrderFromSheetRow(r, idx));
-            syncTablesOccupancyFromOrders();
-            const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
-            dbState.orderCounter = maxNum + 1;
-            updatedStats.orders = dbState.orders.length;
-          }
-        }
         gotAll = true;
       }
     }
   } catch {
   }
-  if (!gotAll || updatedStats.orders === void 0) {
-    if (!gotAll) {
-      try {
-        const uUrl = new URL(webhookUrl);
-        uUrl.searchParams.set("action", "GET_USERS");
-        const uRes = await fetch(uUrl.toString(), { method: "GET" });
-        if (uRes.ok) {
-          const uData = await uRes.json();
-          if (uData && uData.users && Array.isArray(uData.users) && uData.users.length > 0) {
-            dbState.users = uData.users.map((u, idx) => ({
-              id: Number(u.id) || idx + 1,
-              name: String(u.name || ""),
-              username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
-              role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
-              password: String(u.password || u.pin || "123"),
-              pin: String(u.pin || "1234"),
-              active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
-              createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-            }));
-            syncWaitersFromUsers();
-            updatedStats.users = dbState.users.length;
-          }
+  if (!gotAll) {
+    try {
+      const uUrl = new URL(webhookUrl);
+      uUrl.searchParams.set("action", "GET_USERS");
+      const uRes = await fetch(uUrl.toString(), { method: "GET" });
+      if (uRes.ok) {
+        const uData = await uRes.json();
+        if (uData && uData.users && Array.isArray(uData.users) && uData.users.length > 0) {
+          dbState.users = uData.users.map((u, idx) => ({
+            id: Number(u.id) || idx + 1,
+            name: String(u.name || ""),
+            username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
+            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
+            password: String(u.password || u.pin || "123"),
+            pin: String(u.pin || "1234"),
+            active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
+            createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+          }));
+          syncWaitersFromUsers();
+          updatedStats.users = dbState.users.length;
         }
-      } catch {
       }
-      try {
-        const cUrl = new URL(webhookUrl);
-        cUrl.searchParams.set("action", "GET_CONFIG");
-        const cRes = await fetch(cUrl.toString(), { method: "GET" });
-        if (cRes.ok) {
-          const cData = await cRes.json();
-          if (cData && cData.bcvRate !== void 0 && cData.bcvRate !== null && !isNaN(Number(cData.bcvRate))) {
-            dbState.settings.bcvRate = Number(cData.bcvRate);
-            dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-            updatedStats.bcvRate = dbState.settings.bcvRate;
-          }
-          if (cData.restaurant) {
-            dbState.settings.restaurantName = cData.restaurant;
-          }
-        }
-      } catch {
-      }
-      try {
-        const mUrl = new URL(webhookUrl);
-        mUrl.searchParams.set("action", "GET_MENU");
-        const mRes = await fetch(mUrl.toString(), { method: "GET" });
-        if (mRes.ok) {
-          const mData = await mRes.json();
-          if (mData && mData.menu && Array.isArray(mData.menu) && mData.menu.length > 0) {
-            dbState.menu = mData.menu.map((m, idx) => ({
-              id: String(m.id || `m_${idx + 1}`),
-              name: String(m.name || "Plato"),
-              category: String(m.category || "Otros"),
-              price: Number(m.price) || 0,
-              description: String(m.description || ""),
-              quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
-              available: m.available !== false
-            }));
-            const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
-            if (cats.length > 0) dbState.categories = cats;
-            updatedStats.menu = dbState.menu.length;
-          }
-        }
-      } catch {
-      }
-      try {
-        const tUrl = new URL(webhookUrl);
-        tUrl.searchParams.set("action", "GET_TABLES");
-        const tRes = await fetch(tUrl.toString(), { method: "GET" });
-        if (tRes.ok) {
-          const tData = await tRes.json();
-          if (tData && tData.tables && Array.isArray(tData.tables) && tData.tables.length > 0) {
-            dbState.tables = tData.tables.map((t, idx) => ({
-              id: String(t.id || `t_${idx + 1}`),
-              name: String(t.name || `Mesa ${idx + 1}`),
-              capacity: Number(t.capacity) || 4,
-              status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
-              zone: String(t.zone || "Sal\xF3n Principal")
-            }));
-            updatedStats.tables = dbState.tables.length;
-          }
-        }
-      } catch {
-      }
+    } catch {
     }
-    if (updatedStats.orders === void 0) {
-      try {
-        const oUrl = new URL(webhookUrl);
-        oUrl.searchParams.set("action", "GET_ORDERS");
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 6500);
-        const oRes = await fetch(oUrl.toString(), { method: "GET", signal: controller.signal });
-        clearTimeout(timer);
-        if (oRes.ok) {
-          const oData = await oRes.json();
-          if (oData && oData.status === "success" && Array.isArray(oData.orders)) {
-            if (oData.orders.length === 0) {
-              dbState.orders = [];
-              syncTablesOccupancyFromOrders();
-              dbState.orderCounter = 100;
-              updatedStats.orders = 0;
-            } else {
-              dbState.orders = oData.orders.map((r, idx) => parseOrderFromSheetRow(r, idx));
-              syncTablesOccupancyFromOrders();
-              const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
-              dbState.orderCounter = maxNum + 1;
-              updatedStats.orders = dbState.orders.length;
-            }
-          }
+    try {
+      const cUrl = new URL(webhookUrl);
+      cUrl.searchParams.set("action", "GET_CONFIG");
+      const cRes = await fetch(cUrl.toString(), { method: "GET" });
+      if (cRes.ok) {
+        const cData = await cRes.json();
+        if (cData && cData.bcvRate !== void 0 && cData.bcvRate !== null && !isNaN(Number(cData.bcvRate))) {
+          dbState.settings.bcvRate = Number(cData.bcvRate);
+          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+          updatedStats.bcvRate = dbState.settings.bcvRate;
         }
-      } catch (err) {
-        console.warn("[Google Sheets] Error al traer \xF3rdenes en pull-all:", err.message);
+        if (cData.restaurant) {
+          dbState.settings.restaurantName = cData.restaurant;
+        }
       }
+    } catch {
+    }
+    try {
+      const mUrl = new URL(webhookUrl);
+      mUrl.searchParams.set("action", "GET_MENU");
+      const mRes = await fetch(mUrl.toString(), { method: "GET" });
+      if (mRes.ok) {
+        const mData = await mRes.json();
+        if (mData && mData.menu && Array.isArray(mData.menu) && mData.menu.length > 0) {
+          dbState.menu = mData.menu.map((m, idx) => ({
+            id: String(m.id || `m_${idx + 1}`),
+            name: String(m.name || "Plato"),
+            category: String(m.category || "Otros"),
+            price: Number(m.price) || 0,
+            description: String(m.description || ""),
+            quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
+            available: m.available !== false
+          }));
+          const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
+          if (cats.length > 0) dbState.categories = cats;
+          updatedStats.menu = dbState.menu.length;
+        }
+      }
+    } catch {
+    }
+    try {
+      const tUrl = new URL(webhookUrl);
+      tUrl.searchParams.set("action", "GET_TABLES");
+      const tRes = await fetch(tUrl.toString(), { method: "GET" });
+      if (tRes.ok) {
+        const tData = await tRes.json();
+        if (tData && tData.tables && Array.isArray(tData.tables) && tData.tables.length > 0) {
+          dbState.tables = tData.tables.map((t, idx) => ({
+            id: String(t.id || `t_${idx + 1}`),
+            name: String(t.name || `Mesa ${idx + 1}`),
+            capacity: Number(t.capacity) || 4,
+            status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
+            zone: String(t.zone || "Sal\xF3n Principal")
+          }));
+          updatedStats.tables = dbState.tables.length;
+        }
+      }
+    } catch {
     }
   }
   dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
   saveState();
   broadcastServerEvent("sync_completed", { timestamp: dbState.settings.googleSheetsLastSync, updated: updatedStats });
-  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+  broadcastServerEvent("tables_updated", { tables: dbState.tables });
   const parts = [];
   if (updatedStats.users) parts.push(`${updatedStats.users} usuarios`);
   if (updatedStats.bcvRate) parts.push(`Tasa BCV Bs. ${updatedStats.bcvRate.toFixed(2)}`);
