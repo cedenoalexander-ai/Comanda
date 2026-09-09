@@ -1203,6 +1203,121 @@ function scheduleServerAutoSync(entity) {
     }
   }, 150);
 }
+function parseItemsDetailFromSheet(itemsDetailStr, orderNum, createdAt) {
+  if (!itemsDetailStr || typeof itemsDetailStr !== "string") return [];
+  const parts = itemsDetailStr.split(" | ");
+  const items = [];
+  parts.forEach((part, idx) => {
+    const trimmed = part.trim();
+    if (!trimmed) return;
+    const match = trimmed.match(/^(\d+)x\s+([^(\[]+?)(?:\s+\(\$([0-9.]+)\))?(?:\s+\[(.*?)\])?$/);
+    if (match) {
+      const quantity = parseInt(match[1], 10) || 1;
+      const name = match[2].trim();
+      const price = match[3] ? parseFloat(match[3]) : 0;
+      const notes = match[4] ? match[4].trim() : "";
+      items.push({
+        id: `item_${orderNum}_${idx + 1}`,
+        menuItemId: `m_${idx + 1}`,
+        name,
+        price,
+        quantity,
+        notes,
+        round: 1,
+        addedAt: createdAt || (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } else {
+      items.push({
+        id: `item_${orderNum}_${idx + 1}`,
+        menuItemId: `m_${idx + 1}`,
+        name: trimmed,
+        price: 0,
+        quantity: 1,
+        notes: "",
+        round: 1,
+        addedAt: createdAt || (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+  });
+  return items;
+}
+function parseOrderFromSheetRow(r, idx) {
+  const num = Number(String(r.orderNumber || idx + 1).replace(/[^0-9]/g, "")) || idx + 1;
+  const rawStatus = String(r.status || "").toLowerCase();
+  let status = "abierta";
+  if (rawStatus.includes("pagad") || rawStatus.includes("cobrad")) status = "pagada";
+  else if (rawStatus.includes("cuenta")) status = "cuenta_solicitada";
+  else if (rawStatus.includes("cancel")) status = "cancelada";
+  const tableName = String(r.tableName || `Mesa 1`);
+  const matchingTable = dbState.tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase());
+  const tableId = matchingTable ? matchingTable.id : dbState.tables[0]?.id || "t1";
+  const createdAt = r.createdAt || (/* @__PURE__ */ new Date()).toISOString();
+  const updatedAt = r.updatedAt || createdAt;
+  const items = parseItemsDetailFromSheet(r.itemsDetail, num, createdAt);
+  const subtotal = Number(r.subtotal) || 0;
+  const taxAmount = Number(r.taxAmount) || 0;
+  const tipAmount = Number(r.tipAmount) || 0;
+  const total = Number(r.total) || subtotal + taxAmount + tipAmount;
+  let kitchenStatus = "pendiente";
+  const rawK = String(r.kitchenStatus || "").toLowerCase();
+  if (rawK.includes("entregad") || rawK.includes("listo")) kitchenStatus = "listo";
+  else if (rawK.includes("prepar") || rawK.includes("cocina")) kitchenStatus = "en_preparacion";
+  const batches = items.length > 0 ? [{
+    id: `batch_${num}_1`,
+    orderId: `ord_${num}`,
+    orderNumber: num,
+    tableId,
+    tableName,
+    waiterName: String(r.waiterName || "Mesonero"),
+    round: 1,
+    isAddition: false,
+    items,
+    createdAt,
+    status: kitchenStatus
+  }] : [];
+  return {
+    id: `ord_${num}`,
+    orderNumber: num,
+    tableId,
+    tableName,
+    waiterName: String(r.waiterName || "Mesonero"),
+    customerCount: Number(r.customerCount) || 1,
+    status,
+    createdAt,
+    updatedAt,
+    items,
+    batches,
+    subtotal,
+    taxPercent: 0,
+    taxAmount,
+    tipPercent: 0,
+    tipAmount,
+    discountAmount: 0,
+    total,
+    paidAt: status === "pagada" ? updatedAt : void 0,
+    paymentMethod: r.paymentMethod || void 0,
+    syncedToSheets: true
+  };
+}
+function syncTablesOccupancyFromOrders() {
+  dbState.tables = dbState.tables.map((t) => {
+    const activeOrder = dbState.orders.find(
+      (o) => o.tableId === t.id && o.status !== "pagada" && o.status !== "cancelada"
+    );
+    if (activeOrder) {
+      return {
+        ...t,
+        status: activeOrder.status === "cuenta_solicitada" ? "cuenta_solicitada" : "ocupada",
+        activeOrderId: activeOrder.id
+      };
+    }
+    return {
+      ...t,
+      status: "libre",
+      activeOrderId: void 0
+    };
+  });
+}
 app.post("/api/sheets/sync-orders", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {
@@ -1220,6 +1335,88 @@ app.post("/api/sheets/sync-orders", async (req, res) => {
       error: `Error al sincronizar pedidos con Google Sheets: ${err.message}`
     });
   }
+});
+app.post("/api/sheets/pull-orders", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
+  }
+  try {
+    const url = new URL(webhookUrl);
+    url.searchParams.set("action", "GET_ORDERS");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8e3);
+    const gRes = await fetch(url.toString(), { method: "GET", signal: controller.signal });
+    clearTimeout(timer);
+    if (!gRes.ok) {
+      throw new Error(`Google Sheets respondi\xF3 con c\xF3digo HTTP ${gRes.status}`);
+    }
+    const data = await gRes.json();
+    if (data && data.error) {
+      throw new Error(data.error);
+    }
+    const ordersList = Array.isArray(data.orders) ? data.orders : [];
+    if (ordersList.length === 0) {
+      dbState.orders = [];
+      syncTablesOccupancyFromOrders();
+      dbState.orderCounter = 100;
+      saveState();
+      broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+      return res.json({
+        success: true,
+        count: 0,
+        message: '\u2713 Hoja "Pedidos" vac\xEDa en Google Sheets. Se limpiaron las comandas locales y se liberaron todas las mesas para pruebas en limpio.',
+        state: {
+          orders: dbState.orders,
+          tables: dbState.tables
+        }
+      });
+    }
+    dbState.orders = ordersList.map((r, idx) => parseOrderFromSheetRow(r, idx));
+    syncTablesOccupancyFromOrders();
+    const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
+    dbState.orderCounter = maxNum + 1;
+    saveState();
+    broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+    res.json({
+      success: true,
+      count: dbState.orders.length,
+      message: `\u2713 Se sincronizaron exitosamente ${dbState.orders.length} pedidos desde la hoja "Pedidos" de Google Sheets.`,
+      state: {
+        orders: dbState.orders,
+        tables: dbState.tables
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al traer pedidos de Google Sheets: ${err.message}`
+    });
+  }
+});
+app.post("/api/sheets/clear-orders-test", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  dbState.orders = [];
+  syncTablesOccupancyFromOrders();
+  dbState.orderCounter = 100;
+  saveState();
+  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
+  let sheetsMessage = "";
+  if (webhookUrl) {
+    try {
+      await autoSyncOrdersWithSheets(webhookUrl);
+      sheetsMessage = ' y la hoja "Pedidos" en Google Sheets se vaci\xF3 limpiamente';
+    } catch (err) {
+      sheetsMessage = ` (aviso: no se pudo vaciar la hoja en Google Sheets: ${err.message})`;
+    }
+  }
+  res.json({
+    success: true,
+    message: `\u2713 Sistema en limpio: se vaciaron todas las comandas locales${sheetsMessage}. Todas las mesas est\xE1n libres para nuevas pruebas.`,
+    state: {
+      orders: dbState.orders,
+      tables: dbState.tables
+    }
+  });
 });
 app.get("/api/sheets/export-csv-orders", (req, res) => {
   const headers = [
@@ -1401,103 +1598,156 @@ app.post("/api/sheets/pull-all", async (req, res) => {
           }));
           updatedStats.tables = dbState.tables.length;
         }
+        if (data.orders !== void 0 && Array.isArray(data.orders)) {
+          if (data.orders.length === 0) {
+            dbState.orders = [];
+            syncTablesOccupancyFromOrders();
+            dbState.orderCounter = 100;
+            updatedStats.orders = 0;
+          } else {
+            dbState.orders = data.orders.map((r, idx) => parseOrderFromSheetRow(r, idx));
+            syncTablesOccupancyFromOrders();
+            const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
+            dbState.orderCounter = maxNum + 1;
+            updatedStats.orders = dbState.orders.length;
+          }
+        }
         gotAll = true;
       }
     }
   } catch {
   }
-  if (!gotAll) {
-    try {
-      const uUrl = new URL(webhookUrl);
-      uUrl.searchParams.set("action", "GET_USERS");
-      const uRes = await fetch(uUrl.toString(), { method: "GET" });
-      if (uRes.ok) {
-        const uData = await uRes.json();
-        if (uData && uData.users && Array.isArray(uData.users) && uData.users.length > 0) {
-          dbState.users = uData.users.map((u, idx) => ({
-            id: Number(u.id) || idx + 1,
-            name: String(u.name || ""),
-            username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
-            role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
-            password: String(u.password || u.pin || "123"),
-            pin: String(u.pin || "1234"),
-            active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
-            createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-          }));
-          syncWaitersFromUsers();
-          updatedStats.users = dbState.users.length;
+  if (!gotAll || updatedStats.orders === void 0) {
+    if (!gotAll) {
+      try {
+        const uUrl = new URL(webhookUrl);
+        uUrl.searchParams.set("action", "GET_USERS");
+        const uRes = await fetch(uUrl.toString(), { method: "GET" });
+        if (uRes.ok) {
+          const uData = await uRes.json();
+          if (uData && uData.users && Array.isArray(uData.users) && uData.users.length > 0) {
+            dbState.users = uData.users.map((u, idx) => ({
+              id: Number(u.id) || idx + 1,
+              name: String(u.name || ""),
+              username: String(u.username || (u.name || "").toLowerCase().split(" ")[0] || `user${idx + 1}`),
+              role: u.role === "admin" || u.role === "cocina" || u.role === "mesonero" || u.role === "cajero" ? u.role : "mesonero",
+              password: String(u.password || u.pin || "123"),
+              pin: String(u.pin || "1234"),
+              active: u.active !== false && String(u.active).toLowerCase() !== "inactivo",
+              createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+            }));
+            syncWaitersFromUsers();
+            updatedStats.users = dbState.users.length;
+          }
         }
+      } catch {
       }
-    } catch {
+      try {
+        const cUrl = new URL(webhookUrl);
+        cUrl.searchParams.set("action", "GET_CONFIG");
+        const cRes = await fetch(cUrl.toString(), { method: "GET" });
+        if (cRes.ok) {
+          const cData = await cRes.json();
+          if (cData && cData.bcvRate !== void 0 && cData.bcvRate !== null && !isNaN(Number(cData.bcvRate))) {
+            dbState.settings.bcvRate = Number(cData.bcvRate);
+            dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+            updatedStats.bcvRate = dbState.settings.bcvRate;
+          }
+          if (cData.restaurant) {
+            dbState.settings.restaurantName = cData.restaurant;
+          }
+        }
+      } catch {
+      }
+      try {
+        const mUrl = new URL(webhookUrl);
+        mUrl.searchParams.set("action", "GET_MENU");
+        const mRes = await fetch(mUrl.toString(), { method: "GET" });
+        if (mRes.ok) {
+          const mData = await mRes.json();
+          if (mData && mData.menu && Array.isArray(mData.menu) && mData.menu.length > 0) {
+            dbState.menu = mData.menu.map((m, idx) => ({
+              id: String(m.id || `m_${idx + 1}`),
+              name: String(m.name || "Plato"),
+              category: String(m.category || "Otros"),
+              price: Number(m.price) || 0,
+              description: String(m.description || ""),
+              quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
+              available: m.available !== false
+            }));
+            const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
+            if (cats.length > 0) dbState.categories = cats;
+            updatedStats.menu = dbState.menu.length;
+          }
+        }
+      } catch {
+      }
+      try {
+        const tUrl = new URL(webhookUrl);
+        tUrl.searchParams.set("action", "GET_TABLES");
+        const tRes = await fetch(tUrl.toString(), { method: "GET" });
+        if (tRes.ok) {
+          const tData = await tRes.json();
+          if (tData && tData.tables && Array.isArray(tData.tables) && tData.tables.length > 0) {
+            dbState.tables = tData.tables.map((t, idx) => ({
+              id: String(t.id || `t_${idx + 1}`),
+              name: String(t.name || `Mesa ${idx + 1}`),
+              capacity: Number(t.capacity) || 4,
+              status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
+              zone: String(t.zone || "Sal\xF3n Principal")
+            }));
+            updatedStats.tables = dbState.tables.length;
+          }
+        }
+      } catch {
+      }
     }
-    try {
-      const cUrl = new URL(webhookUrl);
-      cUrl.searchParams.set("action", "GET_CONFIG");
-      const cRes = await fetch(cUrl.toString(), { method: "GET" });
-      if (cRes.ok) {
-        const cData = await cRes.json();
-        if (cData && cData.bcvRate !== void 0 && cData.bcvRate !== null && !isNaN(Number(cData.bcvRate))) {
-          dbState.settings.bcvRate = Number(cData.bcvRate);
-          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-          updatedStats.bcvRate = dbState.settings.bcvRate;
+    if (updatedStats.orders === void 0) {
+      try {
+        const oUrl = new URL(webhookUrl);
+        oUrl.searchParams.set("action", "GET_ORDERS");
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6500);
+        const oRes = await fetch(oUrl.toString(), { method: "GET", signal: controller.signal });
+        clearTimeout(timer);
+        if (oRes.ok) {
+          const oData = await oRes.json();
+          if (oData && oData.status === "success" && Array.isArray(oData.orders)) {
+            if (oData.orders.length === 0) {
+              dbState.orders = [];
+              syncTablesOccupancyFromOrders();
+              dbState.orderCounter = 100;
+              updatedStats.orders = 0;
+            } else {
+              dbState.orders = oData.orders.map((r, idx) => parseOrderFromSheetRow(r, idx));
+              syncTablesOccupancyFromOrders();
+              const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
+              dbState.orderCounter = maxNum + 1;
+              updatedStats.orders = dbState.orders.length;
+            }
+          }
         }
-        if (cData.restaurant) {
-          dbState.settings.restaurantName = cData.restaurant;
-        }
+      } catch (err) {
+        console.warn("[Google Sheets] Error al traer \xF3rdenes en pull-all:", err.message);
       }
-    } catch {
-    }
-    try {
-      const mUrl = new URL(webhookUrl);
-      mUrl.searchParams.set("action", "GET_MENU");
-      const mRes = await fetch(mUrl.toString(), { method: "GET" });
-      if (mRes.ok) {
-        const mData = await mRes.json();
-        if (mData && mData.menu && Array.isArray(mData.menu) && mData.menu.length > 0) {
-          dbState.menu = mData.menu.map((m, idx) => ({
-            id: String(m.id || `m_${idx + 1}`),
-            name: String(m.name || "Plato"),
-            category: String(m.category || "Otros"),
-            price: Number(m.price) || 0,
-            description: String(m.description || ""),
-            quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
-            available: m.available !== false
-          }));
-          const cats = Array.from(new Set(dbState.menu.map((m) => m.category)));
-          if (cats.length > 0) dbState.categories = cats;
-          updatedStats.menu = dbState.menu.length;
-        }
-      }
-    } catch {
-    }
-    try {
-      const tUrl = new URL(webhookUrl);
-      tUrl.searchParams.set("action", "GET_TABLES");
-      const tRes = await fetch(tUrl.toString(), { method: "GET" });
-      if (tRes.ok) {
-        const tData = await tRes.json();
-        if (tData && tData.tables && Array.isArray(tData.tables) && tData.tables.length > 0) {
-          dbState.tables = tData.tables.map((t, idx) => ({
-            id: String(t.id || `t_${idx + 1}`),
-            name: String(t.name || `Mesa ${idx + 1}`),
-            capacity: Number(t.capacity) || 4,
-            status: t.status === "ocupada" || t.status === "cuenta_solicitada" ? t.status : "libre",
-            zone: String(t.zone || "Sal\xF3n Principal")
-          }));
-          updatedStats.tables = dbState.tables.length;
-        }
-      }
-    } catch {
     }
   }
   dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
   saveState();
   broadcastServerEvent("sync_completed", { timestamp: dbState.settings.googleSheetsLastSync, updated: updatedStats });
+  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
   const parts = [];
   if (updatedStats.users) parts.push(`${updatedStats.users} usuarios`);
   if (updatedStats.bcvRate) parts.push(`Tasa BCV Bs. ${updatedStats.bcvRate.toFixed(2)}`);
   if (updatedStats.menu) parts.push(`${updatedStats.menu} platos`);
   if (updatedStats.tables) parts.push(`${updatedStats.tables} mesas`);
+  if (updatedStats.orders !== void 0) {
+    if (updatedStats.orders === 0) {
+      parts.push("0 pedidos (hoja en blanco, mesas liberadas para pruebas)");
+    } else {
+      parts.push(`${updatedStats.orders} pedidos`);
+    }
+  }
   res.json({
     success: true,
     message: parts.length > 0 ? `\u2713 Sincronizaci\xF3n exitosa desde Google Sheets: ${parts.join(", ")} actualizados.` : "\u2713 Datos verificados con Google Sheets.",
@@ -1940,8 +2190,7 @@ app.post("/api/auth/login", async (req, res) => {
   if (webhookUrl) {
     dbState.settings.autoSyncGoogleSheets = true;
     saveState();
-    scheduleServerAutoSync("all");
-    sheetSyncMessage = "Sincronizaci\xF3n autom\xE1tica con Google Sheets activada.";
+    sheetSyncMessage = "Sincronizaci\xF3n con Google Sheets activa.";
   }
   res.json({
     success: true,
