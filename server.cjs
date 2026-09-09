@@ -844,6 +844,233 @@ app.get("/api/sheets/get-bcv", async (req, res) => {
     });
   }
 });
+app.post("/api/sheets/pull-from-sheets", async (req, res) => {
+  const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "Webhook URL no configurada" });
+  }
+  const results = {
+    menuUpdated: 0,
+    tablesUpdated: 0,
+    usersUpdated: 0
+  };
+  try {
+    try {
+      const configUrl = new URL(webhookUrl);
+      configUrl.searchParams.set("action", "GET_CONFIG");
+      const configRes = await fetch(configUrl.toString());
+      if (configRes.ok) {
+        const configData = await configRes.json();
+        if (configData.bcvRate && !isNaN(Number(configData.bcvRate))) {
+          dbState.settings.bcvRate = Number(configData.bcvRate);
+          dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+          results.bcvRate = dbState.settings.bcvRate;
+        }
+        if (configData.restaurant && typeof configData.restaurant === "string" && configData.restaurant.trim()) {
+          dbState.settings.restaurantName = configData.restaurant.trim();
+        }
+      }
+    } catch (e) {
+      console.warn("[Pull Sheets] Error fetching config:", e?.message);
+    }
+    try {
+      const menuUrl = new URL(webhookUrl);
+      menuUrl.searchParams.set("action", "GET_MENU");
+      const menuRes = await fetch(menuUrl.toString());
+      if (menuRes.ok) {
+        const menuData = await menuRes.json();
+        if (menuData.status === "success" && Array.isArray(menuData.menu) && menuData.menu.length > 0) {
+          const validDishes = menuData.menu.filter((m) => m && m.name && m.name.trim()).map((m, idx) => ({
+            id: m.id && m.id.trim() ? m.id.trim() : `m_sheet_${idx + 1}`,
+            name: String(m.name).trim(),
+            category: String(m.category || "General").trim(),
+            price: Number(m.price) || 0,
+            available: m.available !== false,
+            description: String(m.description || "").trim(),
+            quickNotes: []
+          }));
+          if (validDishes.length > 0) {
+            dbState.menu = validDishes;
+            const cats = Array.from(new Set(validDishes.map((d) => d.category)));
+            dbState.categories = cats.length > 0 ? cats : ["General"];
+            results.menuUpdated = validDishes.length;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[Pull Sheets] Error fetching menu:", e?.message);
+    }
+    try {
+      const tablesUrl = new URL(webhookUrl);
+      tablesUrl.searchParams.set("action", "GET_TABLES");
+      const tablesRes = await fetch(tablesUrl.toString());
+      if (tablesRes.ok) {
+        const tablesData = await tablesRes.json();
+        if (tablesData.status === "success" && Array.isArray(tablesData.tables) && tablesData.tables.length > 0) {
+          const validTables = tablesData.tables.filter((t) => t && t.name && t.name.trim()).map((t, idx) => {
+            const existingTable = dbState.tables.find((et) => et.id === t.id || et.name === t.name);
+            return {
+              id: t.id && t.id.trim() ? t.id.trim() : `t_sheet_${idx + 1}`,
+              name: String(t.name).trim(),
+              capacity: Number(t.capacity) || 4,
+              status: existingTable?.status || t.status || "libre",
+              zone: String(t.zone || "Sal\xF3n Principal").trim(),
+              activeOrderId: existingTable?.activeOrderId
+            };
+          });
+          if (validTables.length > 0) {
+            dbState.tables = validTables;
+            results.tablesUpdated = validTables.length;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[Pull Sheets] Error fetching tables:", e?.message);
+    }
+    try {
+      const usersUrl = new URL(webhookUrl);
+      usersUrl.searchParams.set("action", "GET_USERS");
+      const usersRes = await fetch(usersUrl.toString());
+      if (usersRes.ok) {
+        const usersData = await usersRes.json();
+        if (usersData.status === "success" && Array.isArray(usersData.users) && usersData.users.length > 0) {
+          const validUsers = normalizeImportedUsers(usersData.users, dbState.users);
+          if (validUsers.length > 0) {
+            dbState.users = validUsers;
+            syncWaitersFromUsers();
+            results.usersUpdated = validUsers.length;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[Pull Sheets] Error fetching users:", e?.message);
+    }
+    dbState.settings.googleSheetsWebhookUrl = webhookUrl;
+    dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
+    saveState();
+    res.json({
+      success: true,
+      message: `\xA1Datos actualizados desde Google Sheets! Platos: ${results.menuUpdated}, Mesas: ${results.tablesUpdated}, Usuarios: ${results.usersUpdated}`,
+      results,
+      state: {
+        tables: dbState.tables,
+        menu: dbState.menu,
+        categories: dbState.categories,
+        settings: dbState.settings,
+        users: dbState.users,
+        waiters: dbState.waiters,
+        orders: dbState.orders
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: `Error al importar datos desde Google Sheets: ${err.message}`
+    });
+  }
+});
+function normalizeImportedUsers(rawUsers, currentUsers) {
+  if (!Array.isArray(rawUsers) || rawUsers.length === 0) return [];
+  const parsed = [];
+  rawUsers.forEach((u, idx) => {
+    if (!u || typeof u !== "object") return;
+    const name = String(u.name || "").trim();
+    if (!name) return;
+    const rawRole = String(u.role || "").trim().toLowerCase();
+    let role = "mesonero";
+    if (rawRole.includes("admin") || rawRole.includes("gerente") || rawRole.includes("encargad") || rawRole.includes("due\xF1o") || rawRole.includes("dueno")) {
+      role = "admin";
+    } else if (rawRole.includes("cocin") || rawRole.includes("chef")) {
+      role = "cocina";
+    } else {
+      role = "mesonero";
+    }
+    let active = true;
+    if (u.active === false || u.active === "false" || u.active === "0") {
+      active = false;
+    } else if (typeof u.active === "string") {
+      const norm = u.active.trim().toLowerCase();
+      if (norm === "inactivo" || norm === "inactiva" || norm === "no") {
+        active = false;
+      }
+    }
+    const pin = String(u.pin !== void 0 && u.pin !== null ? u.pin : "").trim();
+    parsed.push({
+      id: Number(u.id) || idx + 1,
+      name,
+      role,
+      pin: pin || "1234",
+      active,
+      createdAt: u.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  if (parsed.length === 0) return [];
+  const hasAdmin = parsed.some((u) => u.role === "admin");
+  if (!hasAdmin) {
+    const existingAdmin = currentUsers.find((u) => u.role === "admin");
+    if (existingAdmin) {
+      parsed.unshift(existingAdmin);
+    } else {
+      parsed.unshift({
+        id: 1,
+        name: "Administrador Principal",
+        role: "admin",
+        pin: "1234",
+        active: true,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+  }
+  return parsed;
+}
+app.post("/api/sheets/pull-users", async (req, res) => {
+  try {
+    const webhookUrl = req.body?.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+    if (!webhookUrl || typeof webhookUrl !== "string" || !webhookUrl.startsWith("http")) {
+      return res.status(400).json({
+        error: "URL de Google Apps Script no configurada o no v\xE1lida"
+      });
+    }
+    const usersUrl = new URL(webhookUrl);
+    usersUrl.searchParams.set("action", "GET_USERS");
+    const response = await fetch(usersUrl.toString());
+    if (!response.ok) {
+      throw new Error(`Google Sheets respondi\xF3 con status HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.status !== "success" || !Array.isArray(data.users)) {
+      throw new Error(data.message || "La respuesta de Google Sheets no contiene una lista v\xE1lida de usuarios.");
+    }
+    const validUsers = normalizeImportedUsers(data.users, dbState.users);
+    if (validUsers.length === 0) {
+      return res.status(400).json({
+        error: 'No se encontraron filas con nombres de usuario v\xE1lidos en la pesta\xF1a "Usuario" de tu Google Sheet.'
+      });
+    }
+    dbState.users = validUsers;
+    syncWaitersFromUsers();
+    dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
+    saveState();
+    const waiterCount = dbState.waiters.length;
+    res.json({
+      success: true,
+      message: `\xA1Usuarios descargados con \xE9xito! ${validUsers.length} usuarios totales sincronizados (${waiterCount} mesoneros listos para tomar comandas).`,
+      count: validUsers.length,
+      waitersCount: waiterCount,
+      users: dbState.users,
+      waiters: dbState.waiters,
+      state: {
+        users: dbState.users,
+        waiters: dbState.waiters,
+        settings: dbState.settings
+      }
+    });
+  } catch (err) {
+    console.error("[pull-users] Error:", err);
+    res.status(500).json({
+      error: `Error al descargar usuarios desde Google Sheets: ${err.message}`
+    });
+  }
+});
 async function autoSyncMenuWithSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) return;
