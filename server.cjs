@@ -495,7 +495,9 @@ app.post("/api/orders", (req, res) => {
 app.post("/api/orders/:id/items", (req, res) => {
   const { id } = req.params;
   const { items, waiterName } = req.body;
-  const order = dbState.orders.find((o) => o.id === id);
+  const order = dbState.orders.find(
+    (o) => o.id === id || String(o.orderNumber) === String(id) || o.id === `ord_${id}`
+  );
   if (!order) {
     return res.status(404).json({ error: "Pedido no encontrado" });
   }
@@ -1132,7 +1134,13 @@ async function autoSyncOrdersWithSheets(targetUrl) {
   try {
     const bcvRate = dbState.settings.bcvRate || 1;
     const ordersData = dbState.orders.map((o) => {
-      const itemsDetail = o.items.map((i) => `${i.quantity}x ${i.name} ($${i.price})${i.notes ? " [" + i.notes + "]" : ""}`).join(" | ");
+      const hasMultipleBatches = o.batches && o.batches.length > 1;
+      const itemsDetail = (o.items || []).map((i) => {
+        const roundNum = i.round || 1;
+        const roundPrefix = roundNum > 1 || hasMultipleBatches ? `[Ronda ${roundNum}] ` : "";
+        const priceStr = Number(i.price || 0).toFixed(2);
+        return `${roundPrefix}${i.quantity || 1}x ${i.name} ($${priceStr})${i.notes ? " [" + i.notes + "]" : ""}`;
+      }).join(" | ");
       const totalBs = Number((o.total * bcvRate).toFixed(2));
       const kitchenStatus = o.batches && o.batches.length > 0 ? o.batches.map((b, idx) => `Ronda ${b.round || idx + 1}: ${b.status || "pendiente"}`).join("; ") : "N/A";
       return {
@@ -1152,7 +1160,8 @@ async function autoSyncOrdersWithSheets(targetUrl) {
         createdAt: o.createdAt,
         updatedAt: o.updatedAt || o.createdAt,
         paidAt: o.paidAt || "",
-        paymentMethod: o.paymentMethod || ""
+        paymentMethod: o.paymentMethod || "",
+        batchesJson: JSON.stringify(o.batches || [])
       };
     });
     const response = await fetch(webhookUrl, {
@@ -1214,41 +1223,53 @@ function scheduleServerAutoSync(entity) {
     }
   }, 150);
 }
+function parseItemString(rawStr, defaultRound = 1) {
+  let str = (rawStr || "").trim();
+  if (!str) return null;
+  let round = defaultRound;
+  const roundMatch = str.match(/^(?:\[(?:Ronda|R)\s*(\d+)\]|\((?:Ronda|R)\s*(\d+)\)|(?:Ronda|R)\s*(\d+)\s*[:\-])\s*/i);
+  if (roundMatch) {
+    round = parseInt(roundMatch[1] || roundMatch[2] || roundMatch[3], 10) || defaultRound;
+    str = str.slice(roundMatch[0].length).trim();
+  }
+  let quantity = 1;
+  const qtyMatch = str.match(/^(\d+)x\s+/i);
+  if (qtyMatch) {
+    quantity = parseInt(qtyMatch[1], 10) || 1;
+    str = str.slice(qtyMatch[0].length).trim();
+  }
+  let notes = "";
+  const notesMatch = str.match(/\s+\[([^\]]*)\]$/);
+  if (notesMatch) {
+    notes = notesMatch[1].trim();
+    str = str.slice(0, notesMatch.index).trim();
+  }
+  let price = 0;
+  const priceMatch = str.match(/\s+\(\$([0-9]+(?:\.[0-9]+)?)\)$/);
+  if (priceMatch) {
+    price = parseFloat(priceMatch[1]) || 0;
+    str = str.slice(0, priceMatch.index).trim();
+  }
+  const name = str.trim() || "Producto";
+  return { quantity, name, price, notes, round };
+}
 function parseItemsDetailFromSheet(itemsDetailStr, orderNum, createdAt) {
   if (!itemsDetailStr || typeof itemsDetailStr !== "string") return [];
-  const parts = itemsDetailStr.split(" | ");
+  const parts = itemsDetailStr.split(/\s*\|\s*/);
   const items = [];
   parts.forEach((part, idx) => {
-    const trimmed = part.trim();
-    if (!trimmed) return;
-    const match = trimmed.match(/^(\d+)x\s+([^(\[]+?)(?:\s+\(\$([0-9.]+)\))?(?:\s+\[(.*?)\])?$/);
-    if (match) {
-      const quantity = parseInt(match[1], 10) || 1;
-      const name = match[2].trim();
-      const price = match[3] ? parseFloat(match[3]) : 0;
-      const notes = match[4] ? match[4].trim() : "";
-      items.push({
-        id: `item_${orderNum}_${idx + 1}`,
-        menuItemId: `m_${idx + 1}`,
-        name,
-        price,
-        quantity,
-        notes,
-        round: 1,
-        addedAt: createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      });
-    } else {
-      items.push({
-        id: `item_${orderNum}_${idx + 1}`,
-        menuItemId: `m_${idx + 1}`,
-        name: trimmed,
-        price: 0,
-        quantity: 1,
-        notes: "",
-        round: 1,
-        addedAt: createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      });
-    }
+    const parsed = parseItemString(part, 1);
+    if (!parsed) return;
+    items.push({
+      id: `item_${orderNum}_r${parsed.round}_${idx + 1}`,
+      menuItemId: `m_${idx + 1}`,
+      name: parsed.name,
+      price: parsed.price,
+      quantity: parsed.quantity,
+      notes: parsed.notes,
+      round: parsed.round,
+      addedAt: createdAt || (/* @__PURE__ */ new Date()).toISOString()
+    });
   });
   return items;
 }
@@ -1269,23 +1290,61 @@ function parseOrderFromSheetRow(r, idx) {
   const taxAmount = Number(r.taxAmount) || 0;
   const tipAmount = Number(r.tipAmount) || 0;
   const total = Number(r.total) || subtotal + taxAmount + tipAmount;
-  let kitchenStatus = "pendiente";
+  const roundStatusMap = {};
   const rawK = String(r.kitchenStatus || "").toLowerCase();
-  if (rawK.includes("entregad") || rawK.includes("listo")) kitchenStatus = "listo";
-  else if (rawK.includes("prepar") || rawK.includes("cocina")) kitchenStatus = "en_preparacion";
-  const batches = items.length > 0 ? [{
-    id: `batch_${num}_1`,
-    orderId: `ord_${num}`,
-    orderNumber: num,
-    tableId,
-    tableName,
-    waiterName: String(r.waiterName || "Mesonero"),
-    round: 1,
-    isAddition: false,
-    items,
-    createdAt,
-    status: kitchenStatus
-  }] : [];
+  if (rawK) {
+    const roundRegex = /(?:ronda|r)\s*(\d+)\s*:\s*([a-z_]+)/gi;
+    let m;
+    while ((m = roundRegex.exec(rawK)) !== null) {
+      const rNum = parseInt(m[1], 10);
+      const st = m[2].toLowerCase();
+      if (st.includes("entregad")) roundStatusMap[rNum] = "entregado";
+      else if (st.includes("listo")) roundStatusMap[rNum] = "listo";
+      else if (st.includes("prepar") || st.includes("cocina")) roundStatusMap[rNum] = "en_preparacion";
+      else roundStatusMap[rNum] = "pendiente";
+    }
+  }
+  let defaultKitchenStatus = "pendiente";
+  if (rawK.includes("entregad")) defaultKitchenStatus = "entregado";
+  else if (rawK.includes("listo")) defaultKitchenStatus = "listo";
+  else if (rawK.includes("prepar") || rawK.includes("cocina")) defaultKitchenStatus = "en_preparacion";
+  let batches = [];
+  if (r.batchesJson && typeof r.batchesJson === "string") {
+    try {
+      const candidate = JSON.parse(r.batchesJson);
+      if (Array.isArray(candidate) && candidate.length > 0) {
+        batches = candidate;
+      }
+    } catch {
+    }
+  }
+  if (batches.length === 0 && items.length > 0) {
+    const roundMap = /* @__PURE__ */ new Map();
+    items.forEach((it) => {
+      const rNum = it.round || 1;
+      if (!roundMap.has(rNum)) roundMap.set(rNum, []);
+      roundMap.get(rNum).push(it);
+    });
+    const sortedRounds = Array.from(roundMap.keys()).sort((a, b) => a - b);
+    batches = sortedRounds.map((roundNum) => {
+      const roundItems = roundMap.get(roundNum) || [];
+      const isAddition = roundNum > 1;
+      const bStatus = roundStatusMap[roundNum] || (isAddition ? "pendiente" : defaultKitchenStatus);
+      return {
+        id: `batch_${num}_${roundNum}`,
+        orderId: `ord_${num}`,
+        orderNumber: num,
+        tableId,
+        tableName,
+        waiterName: String(r.waiterName || "Mesonero"),
+        round: roundNum,
+        isAddition,
+        items: roundItems,
+        createdAt: isAddition ? updatedAt : createdAt,
+        status: bStatus
+      };
+    });
+  }
   return {
     id: `ord_${num}`,
     orderNumber: num,
@@ -1356,16 +1415,42 @@ function mergeOrdersFromSheetList(ordersList) {
         }
         hasChanges = true;
       }
-      const sheetKitchenStatus = parsed.batches?.[0]?.status;
-      if (sheetKitchenStatus && existing.batches && existing.batches.length > 0) {
-        if (existing.batches[0].status !== sheetKitchenStatus) {
-          existing.batches = existing.batches.map((b) => ({ ...b, status: sheetKitchenStatus }));
-          hasChanges = true;
-        }
+      if (parsed.total && parsed.total !== existing.total) {
+        existing.total = parsed.total;
+        existing.subtotal = parsed.subtotal;
+        existing.taxAmount = parsed.taxAmount;
+        existing.tipAmount = parsed.tipAmount;
+        hasChanges = true;
       }
-      if (parsed.items && parsed.items.length > 0 && (!existing.items || existing.items.length === 0)) {
+      const existingBatches = Array.isArray(existing.batches) ? [...existing.batches] : [];
+      if (Array.isArray(parsed.batches) && parsed.batches.length > 0) {
+        for (const pBatch of parsed.batches) {
+          const matchIdx = existingBatches.findIndex(
+            (b) => b.round === pBatch.round || b.id === pBatch.id
+          );
+          if (matchIdx === -1) {
+            existingBatches.push(pBatch);
+            hasChanges = true;
+          } else {
+            const existingBatch = existingBatches[matchIdx];
+            if (pBatch.items && pBatch.items.length > (existingBatch.items?.length || 0)) {
+              existingBatches[matchIdx] = { ...existingBatch, items: pBatch.items };
+              hasChanges = true;
+            }
+            if (pBatch.status && pBatch.status !== existingBatch.status) {
+              existingBatches[matchIdx] = { ...existingBatches[matchIdx], status: pBatch.status };
+              hasChanges = true;
+            }
+          }
+        }
+        existingBatches.sort((a, b) => (a.round || 1) - (b.round || 1));
+      }
+      if (existingBatches.length > (existing.batches?.length || 0)) {
+        existing.batches = existingBatches;
+        hasChanges = true;
+      }
+      if (parsed.items && parsed.items.length > (existing.items?.length || 0)) {
         existing.items = parsed.items;
-        existing.batches = parsed.batches;
         hasChanges = true;
       }
     }
