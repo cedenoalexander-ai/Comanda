@@ -1322,22 +1322,45 @@ function syncTablesOccupancyFromOrders() {
   });
 }
 function mergeOrdersFromSheetList(ordersList) {
-  if (!Array.isArray(ordersList) || ordersList.length === 0) {
-    return { hasChanges: false, count: dbState.orders.length, newOrdersCount: 0 };
-  }
+  const safeList = Array.isArray(ordersList) ? ordersList : [];
+  const nowMs = Date.now();
+  const recentThresholdMs = 25 * 1e3;
   let hasChanges = false;
   let newOrdersCount = 0;
-  for (const r of ordersList) {
-    const parsed = parseOrderFromSheetRow(r, dbState.orders.length);
-    const existingIndex = dbState.orders.findIndex(
-      (o) => o.orderNumber === parsed.orderNumber || o.id === parsed.id
+  const sheetOrderMap = /* @__PURE__ */ new Map();
+  safeList.forEach((r) => {
+    const num = Number(String(r.orderNumber || "").replace(/[^0-9]/g, ""));
+    if (!isNaN(num) && num > 0) {
+      sheetOrderMap.set(num, r);
+    }
+  });
+  const previousLength = dbState.orders.length;
+  const filteredOrders = dbState.orders.filter((localOrd) => {
+    const orderNum = Number(localOrd.orderNumber);
+    if (sheetOrderMap.has(orderNum)) {
+      return true;
+    }
+    const createdTime = new Date(localOrd.createdAt || 0).getTime();
+    if (!isNaN(createdTime) && nowMs - createdTime < recentThresholdMs) {
+      return true;
+    }
+    return false;
+  });
+  if (filteredOrders.length !== previousLength) {
+    hasChanges = true;
+  }
+  const mergedOrders = [];
+  for (const r of safeList) {
+    const parsed = parseOrderFromSheetRow(r, mergedOrders.length);
+    const existingIndex = filteredOrders.findIndex(
+      (o) => o.orderNumber === parsed.orderNumber
     );
     if (existingIndex === -1) {
-      dbState.orders.unshift(parsed);
+      mergedOrders.push(parsed);
       hasChanges = true;
       newOrdersCount++;
     } else {
-      const existing = dbState.orders[existingIndex];
+      const existing = { ...filteredOrders[existingIndex] };
       if (parsed.status && parsed.status !== existing.status) {
         existing.status = parsed.status;
         existing.updatedAt = parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString();
@@ -1349,16 +1372,29 @@ function mergeOrdersFromSheetList(ordersList) {
       const sheetKitchenStatus = parsed.batches?.[0]?.status;
       if (sheetKitchenStatus && existing.batches && existing.batches.length > 0) {
         if (existing.batches[0].status !== sheetKitchenStatus) {
-          existing.batches[0].status = sheetKitchenStatus;
+          existing.batches = existing.batches.map((b) => ({ ...b, status: sheetKitchenStatus }));
           hasChanges = true;
         }
       }
+      if (parsed.items && parsed.items.length > 0 && (!existing.items || existing.items.length === 0)) {
+        existing.items = parsed.items;
+        existing.batches = parsed.batches;
+        hasChanges = true;
+      }
+      mergedOrders.push(existing);
     }
   }
+  for (const localOrd of filteredOrders) {
+    if (!mergedOrders.some((o) => o.orderNumber === localOrd.orderNumber)) {
+      mergedOrders.unshift(localOrd);
+    }
+  }
+  mergedOrders.sort((a, b) => (b.orderNumber || 0) - (a.orderNumber || 0));
+  dbState.orders = mergedOrders;
   if (hasChanges) {
     syncTablesOccupancyFromOrders();
     const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
-    dbState.orderCounter = Math.max(dbState.orderCounter, maxNum + 1);
+    dbState.orderCounter = maxNum;
     saveState();
     broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
     if (newOrdersCount > 0) {
@@ -1382,7 +1418,7 @@ async function backgroundPollOrdersFromSheets() {
     clearTimeout(timer);
     if (response.ok) {
       const data = await response.json();
-      if (data && Array.isArray(data.orders) && data.orders.length > 0) {
+      if (data && Array.isArray(data.orders)) {
         mergeOrdersFromSheetList(data.orders);
       }
     }
@@ -1430,22 +1466,12 @@ app.post("/api/sheets/pull-orders", async (req, res) => {
       throw new Error(data.error);
     }
     const ordersList = Array.isArray(data.orders) ? data.orders : [];
-    if (ordersList.length === 0) {
-      return res.json({
-        success: true,
-        count: dbState.orders.length,
-        message: "\u2713 No hay pedidos en Google Sheets para importar. Se conservaron los pedidos locales activos.",
-        state: {
-          orders: dbState.orders,
-          tables: dbState.tables
-        }
-      });
-    }
     const { newOrdersCount } = mergeOrdersFromSheetList(ordersList);
+    const message = ordersList.length === 0 ? "\u2713 Google Sheets no tiene pedidos activos. Se sincroniz\xF3 el sistema y se liberaron las mesas." : `\u2713 Se sincronizaron exitosamente ${ordersList.length} pedidos desde Google Sheets (${newOrdersCount} nuevos recibidos para Cocina/KDS).`;
     res.json({
       success: true,
       count: dbState.orders.length,
-      message: `\u2713 Se sincronizaron exitosamente ${ordersList.length} pedidos desde Google Sheets (${newOrdersCount} nuevos recibidos para Cocina/KDS).`,
+      message,
       state: {
         orders: dbState.orders,
         tables: dbState.tables
