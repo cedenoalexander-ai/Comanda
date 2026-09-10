@@ -399,6 +399,11 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: (/* @__PURE__ */ new Date()).toISOString() });
 });
 app.get("/api/state", (req, res) => {
+  const clientWebhook = req.query.webhookUrl || req.headers["x-sheets-webhook"];
+  if (clientWebhook && clientWebhook.startsWith("https://script.google.com") && (!dbState.settings.googleSheetsWebhookUrl || dbState.settings.googleSheetsWebhookUrl.trim() === "")) {
+    dbState.settings.googleSheetsWebhookUrl = clientWebhook.trim();
+    saveState();
+  }
   res.json({
     tables: dbState.tables,
     orders: dbState.orders,
@@ -1120,6 +1125,9 @@ async function autoSyncOrdersWithSheets(targetUrl) {
   if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
     dbState.settings.googleSheetsWebhookUrl = targetUrl;
     saveState();
+  }
+  if (!dbState.orders || dbState.orders.length === 0) {
+    return { success: true, count: 0, reason: "No hay pedidos en memoria para sincronizar" };
   }
   try {
     const bcvRate = dbState.settings.bcvRate || 1;
