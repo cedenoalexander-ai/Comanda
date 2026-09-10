@@ -1323,44 +1323,23 @@ function syncTablesOccupancyFromOrders() {
 }
 function mergeOrdersFromSheetList(ordersList) {
   const safeList = Array.isArray(ordersList) ? ordersList : [];
-  const nowMs = Date.now();
-  const recentThresholdMs = 25 * 1e3;
+  if (safeList.length === 0) {
+    return { hasChanges: false, count: dbState.orders.length, newOrdersCount: 0 };
+  }
   let hasChanges = false;
   let newOrdersCount = 0;
-  const sheetOrderMap = /* @__PURE__ */ new Map();
-  safeList.forEach((r) => {
-    const num = Number(String(r.orderNumber || "").replace(/[^0-9]/g, ""));
-    if (!isNaN(num) && num > 0) {
-      sheetOrderMap.set(num, r);
-    }
-  });
-  const previousLength = dbState.orders.length;
-  const filteredOrders = dbState.orders.filter((localOrd) => {
-    const orderNum = Number(localOrd.orderNumber);
-    if (sheetOrderMap.has(orderNum)) {
-      return true;
-    }
-    const createdTime = new Date(localOrd.createdAt || 0).getTime();
-    if (!isNaN(createdTime) && nowMs - createdTime < recentThresholdMs) {
-      return true;
-    }
-    return false;
-  });
-  if (filteredOrders.length !== previousLength) {
-    hasChanges = true;
-  }
-  const mergedOrders = [];
   for (const r of safeList) {
-    const parsed = parseOrderFromSheetRow(r, mergedOrders.length);
-    const existingIndex = filteredOrders.findIndex(
+    const parsed = parseOrderFromSheetRow(r, dbState.orders.length);
+    if (!parsed || !parsed.orderNumber) continue;
+    const existingIndex = dbState.orders.findIndex(
       (o) => o.orderNumber === parsed.orderNumber
     );
     if (existingIndex === -1) {
-      mergedOrders.push(parsed);
+      dbState.orders.unshift(parsed);
       hasChanges = true;
       newOrdersCount++;
     } else {
-      const existing = { ...filteredOrders[existingIndex] };
+      const existing = dbState.orders[existingIndex];
       if (parsed.status && parsed.status !== existing.status) {
         existing.status = parsed.status;
         existing.updatedAt = parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString();
@@ -1381,16 +1360,9 @@ function mergeOrdersFromSheetList(ordersList) {
         existing.batches = parsed.batches;
         hasChanges = true;
       }
-      mergedOrders.push(existing);
     }
   }
-  for (const localOrd of filteredOrders) {
-    if (!mergedOrders.some((o) => o.orderNumber === localOrd.orderNumber)) {
-      mergedOrders.unshift(localOrd);
-    }
-  }
-  mergedOrders.sort((a, b) => (b.orderNumber || 0) - (a.orderNumber || 0));
-  dbState.orders = mergedOrders;
+  dbState.orders.sort((a, b) => (b.orderNumber || 0) - (a.orderNumber || 0));
   if (hasChanges) {
     syncTablesOccupancyFromOrders();
     const maxNum = Math.max(100, ...dbState.orders.map((o) => o.orderNumber || 0));
