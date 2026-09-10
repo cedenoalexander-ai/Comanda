@@ -1958,6 +1958,12 @@ app.put("/api/settings", (req, res) => {
     updates.bcvRate = Number(updates.bcvRate) || 1;
     updates.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
   }
+  if (!updates.themeColor && dbState.settings.themeColor) {
+    updates.themeColor = dbState.settings.themeColor;
+  }
+  if (!updates.headerStyle && dbState.settings.headerStyle) {
+    updates.headerStyle = dbState.settings.headerStyle;
+  }
   dbState.settings = {
     ...dbState.settings,
     ...updates
