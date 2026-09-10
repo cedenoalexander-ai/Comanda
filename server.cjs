@@ -987,6 +987,13 @@ async function autoSyncMenuWithSheets(targetUrl) {
     saveState();
   }
   try {
+    const seenIds = /* @__PURE__ */ new Set();
+    const cleanMenu = dbState.menu.filter((m) => {
+      const id = String(m.id || "").trim();
+      if (!id || seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    });
     const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -994,7 +1001,7 @@ async function autoSyncMenuWithSheets(targetUrl) {
         action: "SYNC_MENU",
         timestamp: (/* @__PURE__ */ new Date()).toISOString(),
         restaurant: dbState.settings.restaurantName,
-        menu: dbState.menu
+        menu: cleanMenu
       })
     });
     const text = await response.text();
@@ -1221,7 +1228,7 @@ function scheduleServerAutoSync(entity) {
     } catch (err) {
       console.warn(`[Google Sheets Auto-Sync Server] Error en '${entity}':`, err.message);
     }
-  }, 150);
+  }, 700);
 }
 function parseItemString(rawStr, defaultRound = 1) {
   let str = (rawStr || "").trim();
