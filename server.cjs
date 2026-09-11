@@ -1012,6 +1012,23 @@ async function autoSyncMenuWithSheets(targetUrl) {
       if (!id || seenIds.has(id)) return false;
       seenIds.add(id);
       return true;
+    }).map((m) => {
+      const imgStr = String(m.image || m.foto || "").trim();
+      let safeImage = imgStr;
+      if (safeImage.length > 45e3 && !safeImage.startsWith("http")) {
+        safeImage = "";
+      }
+      return {
+        id: String(m.id || ""),
+        name: String(m.name || "Plato"),
+        category: String(m.category || "Otros"),
+        price: Number(m.price) || 0,
+        available: m.available !== false,
+        description: String(m.description || ""),
+        quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
+        image: safeImage,
+        foto: safeImage
+      };
     });
     const response = await fetch(webhookUrl, {
       method: "POST",
