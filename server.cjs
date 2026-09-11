@@ -57,6 +57,7 @@ var INITIAL_MENU = [
     category: "Entradas",
     price: 6.5,
     description: "Dedos crocantes rellenos de abundante queso blanco con salsa t\xE1rtara de la casa.",
+    image: "https://images.unsplash.com/photo-1541592106381-b31e9677c0e5?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Salsa aparte", "Doble salsa", "Bien tostados"],
     available: true
   },
@@ -66,6 +67,7 @@ var INITIAL_MENU = [
     category: "Entradas",
     price: 8,
     description: "Alitas glaseadas en salsa BBQ ahumada servidas con bastones de apio y aderezo ranch.",
+    image: "https://images.unsplash.com/photo-1567620832903-9fc6debc209f?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Picante medio", "Muy picante", "Salsa aparte"],
     available: true
   },
@@ -75,6 +77,7 @@ var INITIAL_MENU = [
     category: "Entradas",
     price: 5.5,
     description: "Carne mechada, pollo, queso y caz\xF3n con guasacaca artesanal.",
+    image: "https://images.unsplash.com/photo-1626700051175-6818013e1d4f?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Con guasacaca", "Sin picante"],
     available: true
   },
@@ -84,6 +87,7 @@ var INITIAL_MENU = [
     category: "Hamburguesas",
     price: 10.5,
     description: "180g de carne de res premium, queso cheddar fundido, lechuga romana, tomate y salsa especial.",
+    image: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Sin cebolla", "Sin tomate", "T\xE9rmino medio", "Bien cocido", "Papas extra"],
     available: true
   },
@@ -93,6 +97,7 @@ var INITIAL_MENU = [
     category: "Hamburguesas",
     price: 13,
     description: "Dos discos smash crujientes, doble tocineta ahumada, queso americano y cebolla caramelizada.",
+    image: "https://images.unsplash.com/photo-1586190848861-99aa4a171e90?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Sin cebolla", "Extra tocineta", "Sin pepinillos", "Salsa aparte"],
     available: true
   },
@@ -102,6 +107,7 @@ var INITIAL_MENU = [
     category: "Hamburguesas",
     price: 12,
     description: "Carne y pollo salteados sobre pan baguette suave, gratinado con queso parmesano y papas hilo.",
+    image: "https://images.unsplash.com/photo-1509722747041-616f39b57569?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Sin salsas", "Salsas aparte", "Extra queso"],
     available: true
   },
@@ -111,6 +117,7 @@ var INITIAL_MENU = [
     category: "Platos Fuertes",
     price: 18.5,
     description: "Cortes jugosos al grill acompa\xF1ados de yuca frita, queso a la plancha, ensalada y guasacaca.",
+    image: "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["T\xE9rmino medio", "Bien cocido", "Yuca sancochada", "Papas fritas en vez de yuca"],
     available: true
   },
@@ -120,6 +127,7 @@ var INITIAL_MENU = [
     category: "Platos Fuertes",
     price: 16,
     description: "Corte magro a la brasa con mantequilla de hierbas finas y papas r\xFAsticas.",
+    image: "https://images.unsplash.com/photo-1544025162-d76694265947?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["T\xE9rmino 1/4", "T\xE9rmino medio", "3/4", "Bien cocido"],
     available: true
   },
@@ -129,6 +137,7 @@ var INITIAL_MENU = [
     category: "Platos Fuertes",
     price: 14,
     description: "Pechuga rellena de jam\xF3n ahumado y queso fundido, ba\xF1ada en salsa de champi\xF1ones con pur\xE9.",
+    image: "https://images.unsplash.com/photo-1604908176997-125f25cc6f3d?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Salsa aparte", "Sin champi\xF1ones"],
     available: true
   },
@@ -138,6 +147,7 @@ var INITIAL_MENU = [
     category: "Pizzas",
     price: 14.5,
     description: "Masa fermentada a mano, salsa pomodoro italiana, abundante mozzarella y pepperoni crocante.",
+    image: "https://images.unsplash.com/photo-1628840042765-356cda07504e?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Masa delgada", "Extra queso", "Bien tostada"],
     available: true
   },
@@ -147,6 +157,7 @@ var INITIAL_MENU = [
     category: "Pizzas",
     price: 12,
     description: "Cl\xE1sica con pomodoro, queso mozzarella fresco, albahaca genovesa y aceite de oliva virgen extra.",
+    image: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Extra or\xE9gano", "Sin albahaca"],
     available: true
   },
@@ -156,6 +167,7 @@ var INITIAL_MENU = [
     category: "Bebidas",
     price: 2.5,
     description: "Servida en copa bien helada (temperatura vestida de novia).",
+    image: "https://images.unsplash.com/photo-1608270586620-248524c67de9?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Bien fr\xEDa", "Con lim\xF3n y sal"],
     available: true
   },
@@ -165,6 +177,7 @@ var INITIAL_MENU = [
     category: "Bebidas",
     price: 3.5,
     description: "Frutas naturales frescas de temporada en agua o leche.",
+    image: "https://images.unsplash.com/photo-1553530666-ba11a7da3888?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["En agua", "En leche", "Sin az\xFAcar", "Poca az\xFAcar", "Con hielo"],
     available: true
   },
@@ -174,6 +187,7 @@ var INITIAL_MENU = [
     category: "Bebidas",
     price: 2,
     description: "Coca-Cola, Pepsi, 7Up, Colita o Agua Mineral con gas.",
+    image: "https://images.unsplash.com/photo-1581009146145-b5ef050c2e1e?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Con hielo y lim\xF3n", "Sin hielo"],
     available: true
   },
@@ -183,6 +197,7 @@ var INITIAL_MENU = [
     category: "C\xF3cteles",
     price: 6,
     description: "Ron blanco a\xF1ejo, hierbabuena fresca machacada, jugo de lima, az\xFAcar de ca\xF1a y soda.",
+    image: "https://images.unsplash.com/photo-1551024709-8f23befc6f87?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Poco dulce", "Fuerte de ron", "Sin az\xFAcar"],
     available: true
   },
@@ -192,6 +207,7 @@ var INITIAL_MENU = [
     category: "C\xF3cteles",
     price: 6.5,
     description: "Tequila reposado, licor triple sec de naranja, jugo de lima y copa escarchada con sal marina.",
+    image: "https://images.unsplash.com/photo-1514362545857-3bc16c4c7d1b?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Escarchada con sal", "Escarchada con taj\xEDn"],
     available: true
   },
@@ -201,6 +217,7 @@ var INITIAL_MENU = [
     category: "Postres",
     price: 5.5,
     description: "Brownie h\xFAmedo de chocolate oscuro con nueces, bola de helado artesanal y sirope de chocolate.",
+    image: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Helado aparte", "Sin nueces"],
     available: true
   },
@@ -210,6 +227,7 @@ var INITIAL_MENU = [
     category: "Postres",
     price: 4.8,
     description: "Bizcocho esponjoso ba\xF1ado en tres leches con merengue suizo flameado y canela.",
+    image: "https://images.unsplash.com/photo-1578985545062-69928b1d9587?w=600&auto=format&fit=crop&q=80",
     quickNotes: ["Con canela extra", "Para compartir"],
     available: true
   }
@@ -1743,6 +1761,7 @@ app.post("/api/sheets/pull-all", async (req, res) => {
             category: String(m.category || "Otros"),
             price: Number(m.price) || 0,
             description: String(m.description || ""),
+            image: String(m.image || m.foto || m.foto_url || m.url_foto || m.imagen || "").trim() || void 0,
             quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
             available: m.available !== false
           }));
@@ -1819,6 +1838,7 @@ app.post("/api/sheets/pull-all", async (req, res) => {
             category: String(m.category || "Otros"),
             price: Number(m.price) || 0,
             description: String(m.description || ""),
+            image: String(m.image || m.foto || m.foto_url || m.url_foto || m.imagen || "").trim() || void 0,
             quickNotes: Array.isArray(m.quickNotes) ? m.quickNotes : [],
             available: m.available !== false
           }));
@@ -1993,6 +2013,7 @@ app.post("/api/menu", (req, res) => {
     category: category || "Platos Principales",
     price: isNaN(cleanPrice) ? 0 : cleanPrice,
     description: description || "",
+    image: (req.body.image || req.body.foto || "").trim() || void 0,
     quickNotes: Array.isArray(quickNotes) ? quickNotes : [],
     available: available !== void 0 ? Boolean(available) : true
   };
@@ -2021,6 +2042,8 @@ app.put("/api/menu/:id", (req, res) => {
     item.price = isNaN(cleanPrice) ? 0 : cleanPrice;
   }
   if (req.body.description !== void 0) item.description = req.body.description;
+  if (req.body.image !== void 0) item.image = String(req.body.image).trim() || void 0;
+  if (req.body.foto !== void 0) item.image = String(req.body.foto).trim() || void 0;
   if (req.body.quickNotes !== void 0) item.quickNotes = req.body.quickNotes;
   if (req.body.available !== void 0) item.available = Boolean(req.body.available);
   saveState();
