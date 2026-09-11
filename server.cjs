@@ -38,7 +38,8 @@ var import_fs = __toESM(require("fs"), 1);
 var import_vite = require("vite");
 var app = (0, import_express.default)();
 var PORT = 3e3;
-app.use(import_express.default.json());
+app.use(import_express.default.json({ limit: "15mb" }));
+app.use(import_express.default.urlencoded({ extended: true, limit: "15mb" }));
 var DATA_DIR = import_path.default.join(process.cwd(), "data");
 var DATA_FILE = import_path.default.join(DATA_DIR, "restaurant_data.json");
 var INITIAL_CATEGORIES = [
@@ -2060,6 +2061,83 @@ app.delete("/api/menu/:id", (req, res) => {
   scheduleServerAutoSync("menu");
   broadcastServerEvent("menu_updated", { action: "delete", id });
   res.json({ message: "Plato eliminado del men\xFA", item: deleted });
+});
+app.post("/api/upload-dish-photo", async (req, res) => {
+  try {
+    const { base64, mimeType, fileName, dishName, webhookUrl } = req.body;
+    if (!base64) {
+      return res.status(400).json({ error: "No se recibieron datos de imagen" });
+    }
+    const targetWebhook = webhookUrl || dbState.settings.googleSheetsWebhookUrl;
+    if (targetWebhook) {
+      try {
+        const payload = {
+          action: "UPLOAD_PHOTO",
+          base64: base64.replace(/^data:image\/\w+;base64,/, ""),
+          mimeType: mimeType || "image/jpeg",
+          fileName: fileName || `plato_${Date.now()}.jpg`,
+          dishName: dishName || "Plato"
+        };
+        const response = await fetch(targetWebhook, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const rawText = await response.text();
+        let data = null;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+        }
+        if (data && (data.fileUrl || data.directUrl || data.url)) {
+          const directUrl = data.directUrl || data.fileUrl || data.url;
+          return res.json({
+            success: true,
+            url: directUrl,
+            fileId: data.fileId,
+            driveUploaded: true,
+            message: data.message || "Foto subida exitosamente a Google Drive"
+          });
+        }
+      } catch (driveErr) {
+        console.warn("[Upload] Error al subir a Google Drive v\xEDa Apps Script:", driveErr.message);
+      }
+    }
+    const uploadsDir = import_path.default.join(process.cwd(), "data", "uploads");
+    if (!import_fs.default.existsSync(uploadsDir)) {
+      import_fs.default.mkdirSync(uploadsDir, { recursive: true });
+    }
+    const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+    const cleanDishName = (dishName || "plato").replace(/[^a-zA-Z0-9]/g, "_").toLowerCase();
+    const diskFileName = `plato_${cleanDishName}_${Date.now()}.${ext}`;
+    const filePath = import_path.default.join(uploadsDir, diskFileName);
+    const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+    import_fs.default.writeFileSync(filePath, buffer);
+    const localUrl = `/api/uploads/${diskFileName}`;
+    res.json({
+      success: true,
+      url: localUrl,
+      driveUploaded: false,
+      message: targetWebhook ? "Foto guardada en el servidor (puedes sincronizar con Google Drive cuando el script est\xE9 actualizado)." : "Foto guardada con \xE9xito en el servidor. Para sincronizarla con tu Google Drive personal, configura la URL de Apps Script en Google Sheets."
+    });
+  } catch (err) {
+    console.error("Error al procesar subida de foto de plato:", err);
+    res.status(500).json({ error: `Error al procesar foto: ${err.message}` });
+  }
+});
+app.get("/api/uploads/:filename", (req, res) => {
+  try {
+    const filename = import_path.default.basename(req.params.filename);
+    const filePath = import_path.default.join(process.cwd(), "data", "uploads", filename);
+    if (import_fs.default.existsSync(filePath)) {
+      res.sendFile(filePath);
+    } else {
+      res.status(404).send("Imagen no encontrada");
+    }
+  } catch {
+    res.status(500).send("Error al leer imagen");
+  }
 });
 app.post("/api/tables", (req, res) => {
   const { name, capacity, zone } = req.body;
