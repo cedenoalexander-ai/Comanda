@@ -934,6 +934,11 @@ app.post("/api/sheets/sync-menu", async (req, res) => {
 app.post("/api/sheets/sync-url", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   const bcvRate = req.body.bcvRate !== void 0 ? Number(req.body.bcvRate) : dbState.settings.bcvRate;
+  const phone = req.body.phone !== void 0 ? req.body.phone : dbState.settings.phone || "";
+  const taxPercent = req.body.taxPercent !== void 0 ? Number(req.body.taxPercent) : dbState.settings.taxPercent || 0;
+  const address = req.body.address !== void 0 ? req.body.address : dbState.settings.address || "";
+  const receiptFooter = req.body.receiptFooter !== void 0 ? req.body.receiptFooter : dbState.settings.receiptFooter || "";
+  const restaurant = req.body.restaurantName || req.body.restaurant || dbState.settings.restaurantName || "Restaurante";
   if (!webhookUrl) {
     return res.status(400).json({ error: "Debe ingresar o guardar la URL del Webhook de Google Sheets" });
   }
@@ -941,7 +946,11 @@ app.post("/api/sheets/sync-url", async (req, res) => {
     const payload = {
       action: "SYNC_URL",
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      restaurant: dbState.settings.restaurantName,
+      restaurant,
+      phone,
+      taxPercent,
+      address,
+      receiptFooter,
       url: webhookUrl,
       bcvRate,
       currencySymbol: dbState.settings.currencySymbol || "$",
@@ -955,7 +964,7 @@ app.post("/api/sheets/sync-url", async (req, res) => {
     });
     res.json({
       success: true,
-      message: `\xA1URL y Tasa BCV (Bs. ${bcvRate.toFixed(2)}) registradas en la pesta\xF1a "URL" de tu Google Sheet!`,
+      message: `\xA1URL, Tasa BCV (Bs. ${bcvRate.toFixed(2)}) y Datos del Negocio registrados en la pesta\xF1a "URL" de tu Google Sheet!`,
       httpStatus: response.status
     });
   } catch (err) {
@@ -976,15 +985,44 @@ app.get("/api/sheets/get-bcv", async (req, res) => {
       method: "GET"
     });
     const data = await response.json();
+    let updated = false;
     if (data.bcvRate && !isNaN(Number(data.bcvRate))) {
       const parsedRate = Number(data.bcvRate);
       dbState.settings.bcvRate = parsedRate;
       dbState.settings.bcvLastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      updated = true;
+    }
+    if (data.restaurant) {
+      dbState.settings.restaurantName = data.restaurant;
+      updated = true;
+    }
+    if (data.phone !== void 0) {
+      dbState.settings.phone = String(data.phone);
+      updated = true;
+    }
+    if (data.taxPercent !== void 0 && !isNaN(Number(data.taxPercent))) {
+      dbState.settings.taxPercent = Number(data.taxPercent);
+      updated = true;
+    }
+    if (data.address !== void 0) {
+      dbState.settings.address = String(data.address);
+      updated = true;
+    }
+    if (data.receiptFooter !== void 0) {
+      dbState.settings.receiptFooter = String(data.receiptFooter);
+      updated = true;
+    }
+    if (updated) {
       saveState();
+      broadcastServerEvent("settings_updated", { settings: dbState.settings });
+    }
+    if (data.bcvRate && !isNaN(Number(data.bcvRate))) {
+      const parsedRate = Number(data.bcvRate);
       return res.json({
         success: true,
         bcvRate: parsedRate,
-        message: `Tasa BCV sincronizada con \xE9xito desde la pesta\xF1a "URL" de Google Sheets: Bs. ${parsedRate.toFixed(2)}`
+        settings: dbState.settings,
+        message: `Tasa BCV (Bs. ${parsedRate.toFixed(2)}) y datos del negocio sincronizados desde la pesta\xF1a "URL" de Google Sheets`
       });
     }
     res.json({
@@ -1147,6 +1185,10 @@ async function autoSyncUrlWithSheets(targetUrl) {
         action: "SYNC_URL",
         timestamp: (/* @__PURE__ */ new Date()).toISOString(),
         restaurant: dbState.settings.restaurantName,
+        phone: dbState.settings.phone || "",
+        taxPercent: dbState.settings.taxPercent !== void 0 ? Number(dbState.settings.taxPercent) : 0,
+        address: dbState.settings.address || "",
+        receiptFooter: dbState.settings.receiptFooter || "",
         url: webhookUrl,
         bcvRate: dbState.settings.bcvRate,
         currencySymbol: dbState.settings.currencySymbol || "$",
@@ -1158,7 +1200,7 @@ async function autoSyncUrlWithSheets(targetUrl) {
     if (text.includes("ServiceLogin") || text.includes("accounts.google.com")) {
       console.warn("[Google Sheets] Error de permisos en Google Apps Script");
     } else {
-      console.log(`[Google Sheets] Auto-synced URL & Tasa BCV (Bs. ${dbState.settings.bcvRate}) to sheet "URL"`);
+      console.log(`[Google Sheets] Auto-synced URL, Tasa BCV (Bs. ${dbState.settings.bcvRate}) & Business Data to sheet "URL"`);
     }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncUrl error:", err.message);
@@ -1772,6 +1814,18 @@ app.post("/api/sheets/pull-all", async (req, res) => {
         if (data.restaurant) {
           dbState.settings.restaurantName = data.restaurant;
         }
+        if (data.phone !== void 0) {
+          dbState.settings.phone = String(data.phone);
+        }
+        if (data.taxPercent !== void 0 && !isNaN(Number(data.taxPercent))) {
+          dbState.settings.taxPercent = Number(data.taxPercent);
+        }
+        if (data.address !== void 0) {
+          dbState.settings.address = String(data.address);
+        }
+        if (data.receiptFooter !== void 0) {
+          dbState.settings.receiptFooter = String(data.receiptFooter);
+        }
         if (data.menu && Array.isArray(data.menu) && data.menu.length > 0) {
           dbState.menu = data.menu.map((m, idx) => ({
             id: String(m.id || `m_${idx + 1}`),
@@ -1839,6 +1893,18 @@ app.post("/api/sheets/pull-all", async (req, res) => {
         }
         if (cData.restaurant) {
           dbState.settings.restaurantName = cData.restaurant;
+        }
+        if (cData.phone !== void 0) {
+          dbState.settings.phone = String(cData.phone);
+        }
+        if (cData.taxPercent !== void 0 && !isNaN(Number(cData.taxPercent))) {
+          dbState.settings.taxPercent = Number(cData.taxPercent);
+        }
+        if (cData.address !== void 0) {
+          dbState.settings.address = String(cData.address);
+        }
+        if (cData.receiptFooter !== void 0) {
+          dbState.settings.receiptFooter = String(cData.receiptFooter);
         }
       }
     } catch {
@@ -2009,7 +2075,7 @@ app.put("/api/settings", (req, res) => {
   saveState();
   scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 || updates.googleSheetsWebhookUrl ? "all" : "url");
   broadcastServerEvent("settings_updated", { settings: dbState.settings });
-  if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0) {
+  if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0 || updates.phone !== void 0 || updates.taxPercent !== void 0 || updates.address !== void 0 || updates.receiptFooter !== void 0 || updates.restaurantName !== void 0) {
     autoSyncUrlWithSheets().catch(() => {
     });
     if (updates.googleSheetsWebhookUrl) {
