@@ -501,6 +501,8 @@ app.post("/api/orders", (req, res) => {
   table.status = "ocupada";
   table.activeOrderId = orderId;
   dbState.orders.unshift(newOrder);
+  markServerOrderUpdated(newOrder.id, newOrder.orderNumber);
+  markServerBatchUpdated(initialBatch.id);
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
@@ -558,6 +560,8 @@ app.post("/api/orders/:id/items", (req, res) => {
   order.updatedAt = now;
   if (waiterName) order.waiterName = waiterName;
   calculateOrderTotals(order, dbState.settings.taxPercent);
+  markServerOrderUpdated(order.id, order.orderNumber);
+  markServerBatchUpdated(newBatch.id);
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
@@ -586,6 +590,11 @@ app.patch("/api/batches/:batchId/status", (req, res) => {
   }
   if (status) {
     foundBatch.status = status;
+    markServerBatchUpdated(batchId);
+    if (parentOrder) {
+      parentOrder.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      markServerOrderUpdated(parentOrder.id, parentOrder.orderNumber);
+    }
   }
   if (markPrinted) {
     foundBatch.printedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -609,6 +618,7 @@ app.post("/api/orders/:id/request-bill", (req, res) => {
   if (table) {
     table.status = "cuenta_solicitada";
   }
+  markServerOrderUpdated(order.id, order.orderNumber);
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
@@ -626,6 +636,7 @@ app.post("/api/orders/:id/pay", async (req, res) => {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   order.status = "pagada";
   order.paidAt = now;
+  order.updatedAt = now;
   order.paymentMethod = paymentMethod || "efectivo";
   order.paymentReference = paymentReference || "";
   if (typeof tipPercent === "number") order.tipPercent = tipPercent;
@@ -637,6 +648,7 @@ app.post("/api/orders/:id/pay", async (req, res) => {
     table.status = "libre";
     table.activeOrderId = void 0;
   }
+  markServerOrderUpdated(order.id, order.orderNumber);
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
@@ -1170,13 +1182,15 @@ async function autoSyncUsersWithSheets(targetUrl) {
     console.warn("[Google Sheets] autoSyncUsers error:", err.message);
   }
 }
+var isSyncingUrl = false;
 async function autoSyncUrlWithSheets(targetUrl) {
   const webhookUrl = targetUrl || dbState.settings.googleSheetsWebhookUrl;
-  if (!webhookUrl) return;
+  if (!webhookUrl || isSyncingUrl) return;
   if (targetUrl && dbState.settings.googleSheetsWebhookUrl !== targetUrl) {
     dbState.settings.googleSheetsWebhookUrl = targetUrl;
     saveState();
   }
+  isSyncingUrl = true;
   try {
     const response = await fetch(webhookUrl, {
       method: "POST",
@@ -1204,6 +1218,10 @@ async function autoSyncUrlWithSheets(targetUrl) {
     }
   } catch (err) {
     console.warn("[Google Sheets] autoSyncUrl error:", err.message);
+  } finally {
+    setTimeout(() => {
+      isSyncingUrl = false;
+    }, 1500);
   }
 }
 async function autoSyncOrdersWithSheets(targetUrl) {
@@ -1473,6 +1491,57 @@ function syncTablesOccupancyFromOrders() {
     };
   });
 }
+var recentServerOrderUpdates = /* @__PURE__ */ new Map();
+var recentServerBatchUpdates = /* @__PURE__ */ new Map();
+function markServerOrderUpdated(orderId, orderNumber) {
+  const now = Date.now();
+  if (orderId) recentServerOrderUpdates.set(orderId, now);
+  if (orderNumber) recentServerOrderUpdates.set(String(orderNumber), now);
+}
+function markServerBatchUpdated(batchId) {
+  if (batchId) recentServerBatchUpdates.set(batchId, Date.now());
+}
+function getServerOrderStatusWeight(status) {
+  if (!status) return 0;
+  const s = String(status).toLowerCase().trim();
+  if (s === "pagada" || s === "cancelada") return 3;
+  if (s === "cuenta_solicitada") return 2;
+  if (s === "activa" || s === "en_consumo") return 1;
+  return 0;
+}
+function getServerBatchStatusWeight(status) {
+  if (!status) return 0;
+  const s = String(status).toLowerCase().trim();
+  if (s === "entregado") return 4;
+  if (s === "listo") return 3;
+  if (s === "en_preparacion" || s === "preparacion") return 2;
+  if (s === "pendiente") return 1;
+  return 0;
+}
+function shouldServerUpdateOrderStatus(existingStatus, incomingStatus, orderKey) {
+  if (!incomingStatus || incomingStatus === existingStatus) return false;
+  if (existingStatus === "pagada" || existingStatus === "cancelada") return false;
+  const existingWeight = getServerOrderStatusWeight(existingStatus);
+  const incomingWeight = getServerOrderStatusWeight(incomingStatus);
+  const lastUpdate = recentServerOrderUpdates.get(orderKey) || 0;
+  if (Date.now() - lastUpdate < 25e3) {
+    return incomingWeight > existingWeight;
+  }
+  if (existingStatus === "cuenta_solicitada" && (incomingStatus === "activa" || incomingStatus === "en_consumo")) {
+    return false;
+  }
+  return incomingWeight >= existingWeight;
+}
+function shouldServerUpdateBatchStatus(existingStatus, incomingStatus, batchId) {
+  if (!incomingStatus || incomingStatus === existingStatus) return false;
+  const existingWeight = getServerBatchStatusWeight(existingStatus);
+  const incomingWeight = getServerBatchStatusWeight(incomingStatus);
+  const lastUpdate = recentServerBatchUpdates.get(batchId) || 0;
+  if (Date.now() - lastUpdate < 25e3) {
+    return incomingWeight > existingWeight;
+  }
+  return incomingWeight >= existingWeight;
+}
 function mergeOrdersFromSheetList(ordersList) {
   const safeList = Array.isArray(ordersList) ? ordersList : [];
   if (safeList.length === 0) {
@@ -1492,7 +1561,8 @@ function mergeOrdersFromSheetList(ordersList) {
       newOrdersCount++;
     } else {
       const existing = dbState.orders[existingIndex];
-      if (parsed.status && parsed.status !== existing.status) {
+      const orderKey = String(existing.orderNumber || existing.id);
+      if (shouldServerUpdateOrderStatus(existing.status, parsed.status, orderKey)) {
         existing.status = parsed.status;
         existing.updatedAt = parsed.updatedAt || (/* @__PURE__ */ new Date()).toISOString();
         if (parsed.status === "pagada" && !existing.paidAt) {
@@ -1500,7 +1570,7 @@ function mergeOrdersFromSheetList(ordersList) {
         }
         hasChanges = true;
       }
-      if (parsed.total && parsed.total !== existing.total) {
+      if (parsed.total && parsed.total !== existing.total && existing.status !== "pagada") {
         existing.total = parsed.total;
         existing.subtotal = parsed.subtotal;
         existing.taxAmount = parsed.taxAmount;
@@ -1522,7 +1592,7 @@ function mergeOrdersFromSheetList(ordersList) {
               existingBatches[matchIdx] = { ...existingBatch, items: pBatch.items };
               hasChanges = true;
             }
-            if (pBatch.status && pBatch.status !== existingBatch.status) {
+            if (shouldServerUpdateBatchStatus(existingBatch.status, pBatch.status, existingBatch.id)) {
               existingBatches[matchIdx] = { ...existingBatches[matchIdx], status: pBatch.status };
               hasChanges = true;
             }
@@ -1953,6 +2023,7 @@ app.post("/api/sheets/pull-all", async (req, res) => {
     } catch {
     }
   }
+  syncTablesOccupancyFromOrders();
   dbState.settings.googleSheetsLastSync = (/* @__PURE__ */ new Date()).toISOString();
   saveState();
   broadcastServerEvent("sync_completed", { timestamp: dbState.settings.googleSheetsLastSync, updated: updatedStats });
@@ -2075,13 +2146,9 @@ app.put("/api/settings", (req, res) => {
   saveState();
   scheduleServerAutoSync(updates.autoSyncGoogleSheets !== void 0 || updates.googleSheetsWebhookUrl ? "all" : "url");
   broadcastServerEvent("settings_updated", { settings: dbState.settings });
-  if (updates.googleSheetsWebhookUrl || updates.bcvRate !== void 0 || updates.phone !== void 0 || updates.taxPercent !== void 0 || updates.address !== void 0 || updates.receiptFooter !== void 0 || updates.restaurantName !== void 0) {
-    autoSyncUrlWithSheets().catch(() => {
+  if (updates.googleSheetsWebhookUrl) {
+    autoSyncOrdersWithSheets(updates.googleSheetsWebhookUrl).catch(() => {
     });
-    if (updates.googleSheetsWebhookUrl) {
-      autoSyncOrdersWithSheets(updates.googleSheetsWebhookUrl).catch(() => {
-      });
-    }
   }
   res.json({ message: "Configuraci\xF3n actualizada", settings: dbState.settings });
 });
