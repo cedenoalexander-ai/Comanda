@@ -421,11 +421,26 @@ function broadcastServerEvent(eventType, data) {
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: (/* @__PURE__ */ new Date()).toISOString() });
 });
-app.get("/api/state", (req, res) => {
+app.get("/api/state", async (req, res) => {
   const clientWebhook = req.query.webhookUrl || req.headers["x-sheets-webhook"];
-  if (clientWebhook && clientWebhook.startsWith("https://script.google.com") && (!dbState.settings.googleSheetsWebhookUrl || dbState.settings.googleSheetsWebhookUrl.trim() === "")) {
-    dbState.settings.googleSheetsWebhookUrl = clientWebhook.trim();
-    saveState();
+  let webhookUpdated = false;
+  if (clientWebhook && clientWebhook.startsWith("https://script.google.com")) {
+    if (dbState.settings.googleSheetsWebhookUrl !== clientWebhook.trim()) {
+      dbState.settings.googleSheetsWebhookUrl = clientWebhook.trim();
+      saveState();
+      webhookUpdated = true;
+      backgroundPollOrdersFromSheets().catch(() => {
+      });
+    }
+  }
+  if (dbState.settings.googleSheetsWebhookUrl && (webhookUpdated || !dbState.orders || dbState.orders.length === 0)) {
+    try {
+      await Promise.race([
+        backgroundPollOrdersFromSheets(),
+        new Promise((resolve) => setTimeout(resolve, 2200))
+      ]);
+    } catch {
+    }
   }
   syncTablesOccupancyFromOrders();
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
@@ -1632,16 +1647,19 @@ function mergeOrdersFromSheetList(ordersList) {
   return { hasChanges, count: dbState.orders.length, newOrdersCount };
 }
 var isBackgroundPollingOrders = false;
+var lastServerSheetsPollTime = 0;
 async function backgroundPollOrdersFromSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl || dbState.settings.autoSyncGoogleSheets === false) return;
-  if (isBackgroundPollingOrders) return;
+  const now = Date.now();
+  if (isBackgroundPollingOrders || now - lastServerSheetsPollTime < 2e3) return;
   isBackgroundPollingOrders = true;
+  lastServerSheetsPollTime = now;
   try {
     const url = new URL(webhookUrl);
     url.searchParams.set("action", "GET_ORDERS");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4e3);
+    const timer = setTimeout(() => controller.abort(), 9e3);
     const response = await fetch(url.toString(), { method: "GET", signal: controller.signal });
     clearTimeout(timer);
     if (response.ok) {
@@ -1655,7 +1673,7 @@ async function backgroundPollOrdersFromSheets() {
     isBackgroundPollingOrders = false;
   }
 }
-setInterval(backgroundPollOrdersFromSheets, 4e3);
+setInterval(backgroundPollOrdersFromSheets, 3e3);
 app.post("/api/sheets/sync-orders", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {
