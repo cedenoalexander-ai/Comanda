@@ -380,9 +380,13 @@ app.get("/api/events", (req, res) => {
   res.write(`data: ${JSON.stringify({ type: "connected", clientsCount: sseClients.size, time: Date.now() })}
 
 `);
-  req.on("close", () => {
+  const cleanupClient = () => {
     sseClients.delete(res);
-  });
+  };
+  req.on("close", cleanupClient);
+  req.on("error", cleanupClient);
+  res.on("error", cleanupClient);
+  res.on("finish", cleanupClient);
 });
 setInterval(() => {
   if (sseClients.size > 0) {
@@ -419,15 +423,14 @@ app.get("/api/health", (req, res) => {
 });
 app.get("/api/state", (req, res) => {
   const clientWebhook = req.query.webhookUrl || req.headers["x-sheets-webhook"];
-  if (clientWebhook && clientWebhook.startsWith("https://script.google.com") && dbState.settings.googleSheetsWebhookUrl !== clientWebhook.trim()) {
+  if (clientWebhook && clientWebhook.startsWith("https://script.google.com") && (!dbState.settings.googleSheetsWebhookUrl || dbState.settings.googleSheetsWebhookUrl.trim() === "")) {
     dbState.settings.googleSheetsWebhookUrl = clientWebhook.trim();
     saveState();
-    setTimeout(() => {
-      backgroundPollOrdersFromSheets().catch(() => {
-      });
-    }, 100);
   }
   syncTablesOccupancyFromOrders();
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   res.json({
     tables: dbState.tables,
     orders: dbState.orders,
@@ -508,26 +511,10 @@ app.post("/api/orders", (req, res) => {
   dbState.orders.unshift(newOrder);
   markServerOrderUpdated(newOrder.id, newOrder.orderNumber);
   markServerBatchUpdated(initialBatch.id);
-  syncTablesOccupancyFromOrders();
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
-  broadcastServerEvent("order_created", {
-    orderId: newOrder.id,
-    orderNumber: newOrder.orderNumber,
-    tableName: table.name,
-    tableId: table.id,
-    waiterName: newOrder.waiterName
-  });
-  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
-  broadcastServerEvent("tables_updated", { tables: dbState.tables });
-  broadcastServerEvent("new_kitchen_batch", {
-    count: 1,
-    orderNumber: newOrder.orderNumber,
-    tableName: table.name,
-    waiterName: newOrder.waiterName,
-    batch: initialBatch
-  });
+  broadcastServerEvent("order_created", { orderId: newOrder.id, orderNumber: newOrder.orderNumber, tableName: table.name });
   res.status(201).json({
     message: "Pedido enviado a cocina exitosamente",
     order: newOrder,
@@ -583,27 +570,10 @@ app.post("/api/orders/:id/items", (req, res) => {
   calculateOrderTotals(order, dbState.settings.taxPercent);
   markServerOrderUpdated(order.id, order.orderNumber);
   markServerBatchUpdated(newBatch.id);
-  syncTablesOccupancyFromOrders();
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
-  broadcastServerEvent("order_updated", {
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    round: nextRound,
-    tableName: order.tableName,
-    tableId: order.tableId,
-    waiterName: order.waiterName
-  });
-  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
-  broadcastServerEvent("tables_updated", { tables: dbState.tables });
-  broadcastServerEvent("new_kitchen_batch", {
-    count: 1,
-    orderNumber: order.orderNumber,
-    tableName: order.tableName,
-    waiterName: order.waiterName,
-    batch: newBatch
-  });
+  broadcastServerEvent("order_updated", { orderId: order.id, orderNumber: order.orderNumber, round: nextRound, tableName: order.tableName });
   res.json({
     message: `Ronda #${nextRound} (Adicional) enviada a cocina`,
     order,
@@ -657,13 +627,10 @@ app.post("/api/orders/:id/request-bill", (req, res) => {
     table.status = "cuenta_solicitada";
   }
   markServerOrderUpdated(order.id, order.orderNumber);
-  syncTablesOccupancyFromOrders();
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
-  broadcastServerEvent("bill_requested", { orderId: order.id, tableName: order.tableName, orderNumber: order.orderNumber, tableId: order.tableId });
-  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
-  broadcastServerEvent("tables_updated", { tables: dbState.tables });
+  broadcastServerEvent("bill_requested", { orderId: order.id, tableName: order.tableName, orderNumber: order.orderNumber });
   res.json({ message: "Cuenta solicitada para la mesa", order });
 });
 app.post("/api/orders/:id/pay", async (req, res) => {
@@ -690,13 +657,10 @@ app.post("/api/orders/:id/pay", async (req, res) => {
     table.activeOrderId = void 0;
   }
   markServerOrderUpdated(order.id, order.orderNumber);
-  syncTablesOccupancyFromOrders();
   saveState();
   scheduleServerAutoSync("tables");
   scheduleServerAutoSync("orders");
-  broadcastServerEvent("order_paid", { orderId: order.id, orderNumber: order.orderNumber, tableName: order.tableName, tableId: order.tableId });
-  broadcastServerEvent("orders_updated", { orders: dbState.orders, tables: dbState.tables });
-  broadcastServerEvent("tables_updated", { tables: dbState.tables });
+  broadcastServerEvent("order_paid", { orderId: order.id, orderNumber: order.orderNumber, tableName: order.tableName });
   if (dbState.settings.googleSheetsWebhookUrl) {
     try {
       syncOrderToGoogleSheets(order, dbState.settings.googleSheetsWebhookUrl);
@@ -1427,24 +1391,9 @@ function parseOrderFromSheetRow(r, idx) {
   if (rawStatus.includes("pagad") || rawStatus.includes("cobrad")) status = "pagada";
   else if (rawStatus.includes("cuenta")) status = "cuenta_solicitada";
   else if (rawStatus.includes("cancel")) status = "cancelada";
-  const tableName = String(r.tableName || `Mesa 1`).trim();
-  const cleanTableName = tableName.toLowerCase();
-  const tableNum = tableName.replace(/[^0-9]/g, "");
-  let matchingTable = dbState.tables.find(
-    (t) => t.name.toLowerCase().trim() === cleanTableName || t.id.toLowerCase() === cleanTableName
-  );
-  if (!matchingTable && tableNum) {
-    matchingTable = dbState.tables.find(
-      (t) => t.name.replace(/[^0-9]/g, "") === tableNum || t.id.replace(/[^0-9]/g, "") === tableNum
-    );
-  }
-  if (!matchingTable) {
-    matchingTable = dbState.tables.find(
-      (t) => t.name.toLowerCase().includes(cleanTableName) || cleanTableName.includes(t.name.toLowerCase())
-    );
-  }
-  const tableId = matchingTable ? matchingTable.id : tableNum ? `t${tableNum}` : dbState.tables[0]?.id || "t1";
-  const resolvedTableName = matchingTable ? matchingTable.name : tableName;
+  const tableName = String(r.tableName || `Mesa 1`);
+  const matchingTable = dbState.tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase());
+  const tableId = matchingTable ? matchingTable.id : dbState.tables[0]?.id || "t1";
   const createdAt = r.createdAt || (/* @__PURE__ */ new Date()).toISOString();
   const updatedAt = r.updatedAt || createdAt;
   const items = parseItemsDetailFromSheet(r.itemsDetail, num, createdAt);
@@ -1533,28 +1482,20 @@ function parseOrderFromSheetRow(r, idx) {
 }
 function syncTablesOccupancyFromOrders() {
   dbState.tables = dbState.tables.map((t) => {
-    const activeOrder = dbState.orders.find((o) => {
-      if (o.status === "pagada" || o.status === "cancelada") return false;
-      if (o.tableId === t.id || String(o.tableId) === String(t.id)) return true;
-      if (o.tableName && t.name && o.tableName.trim().toLowerCase() === t.name.trim().toLowerCase()) return true;
-      const cleanO = String(o.tableId || "").replace(/[^0-9]/g, "");
-      const cleanT = String(t.id || "").replace(/[^0-9]/g, "");
-      if (cleanO && cleanT && cleanO === cleanT) return true;
-      return false;
-    });
+    const activeOrder = dbState.orders.find(
+      (o) => o.tableId === t.id && o.status !== "pagada" && o.status !== "cancelada"
+    );
     if (activeOrder) {
       return {
         ...t,
         status: activeOrder.status === "cuenta_solicitada" ? "cuenta_solicitada" : "ocupada",
-        activeOrderId: activeOrder.id,
-        waiterName: activeOrder.waiterName
+        activeOrderId: activeOrder.id
       };
     }
     return {
       ...t,
       status: "libre",
-      activeOrderId: void 0,
-      waiterName: void 0
+      activeOrderId: void 0
     };
   });
 }
@@ -1700,7 +1641,7 @@ async function backgroundPollOrdersFromSheets() {
     const url = new URL(webhookUrl);
     url.searchParams.set("action", "GET_ORDERS");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12e3);
+    const timer = setTimeout(() => controller.abort(), 4e3);
     const response = await fetch(url.toString(), { method: "GET", signal: controller.signal });
     clearTimeout(timer);
     if (response.ok) {
@@ -1714,7 +1655,7 @@ async function backgroundPollOrdersFromSheets() {
     isBackgroundPollingOrders = false;
   }
 }
-setInterval(backgroundPollOrdersFromSheets, 3e3);
+setInterval(backgroundPollOrdersFromSheets, 4e3);
 app.post("/api/sheets/sync-orders", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {

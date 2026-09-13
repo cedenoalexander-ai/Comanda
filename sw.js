@@ -1,5 +1,5 @@
 // RestoComanda PWA Service Worker
-const CACHE_NAME = 'restocomanda-v1';
+const CACHE_NAME = 'restocomanda-v2';
 
 const STATIC_ASSETS = [
   './',
@@ -23,7 +23,11 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
-        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+        keys.map((key) => {
+          if (key !== CACHE_NAME) {
+            return caches.delete(key);
+          }
+        })
       );
     }).then(() => self.clients.claim())
   );
@@ -37,6 +41,9 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   if (url.origin !== self.location.origin) return;
 
+  // CRITICAL: NEVER intercept API calls or SSE EventSource streams
+  if (url.pathname.startsWith('/api/') || url.pathname.includes('/api/')) return;
+
   // Handle SPA navigation requests
   if (req.mode === 'navigate') {
     event.respondWith(
@@ -47,7 +54,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for static assets
+  // Stale-while-revalidate for static assets only
   event.respondWith(
     caches.match(req).then((cachedResponse) => {
       if (cachedResponse) {
