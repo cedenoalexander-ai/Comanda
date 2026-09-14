@@ -1652,7 +1652,7 @@ async function backgroundPollOrdersFromSheets() {
   const webhookUrl = dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl || dbState.settings.autoSyncGoogleSheets === false) return;
   const now = Date.now();
-  if (isBackgroundPollingOrders || now - lastServerSheetsPollTime < 2e3) return;
+  if (isBackgroundPollingOrders || now - lastServerSheetsPollTime < 8e3) return;
   isBackgroundPollingOrders = true;
   lastServerSheetsPollTime = now;
   try {
@@ -1673,7 +1673,7 @@ async function backgroundPollOrdersFromSheets() {
     isBackgroundPollingOrders = false;
   }
 }
-setInterval(backgroundPollOrdersFromSheets, 3e3);
+setInterval(backgroundPollOrdersFromSheets, 1e4);
 app.post("/api/sheets/sync-orders", async (req, res) => {
   const webhookUrl = req.body.webhookUrl || dbState.settings.googleSheetsWebhookUrl;
   if (!webhookUrl) {
